@@ -20,7 +20,7 @@ The report does three things Activity Monitor cannot:
 
 1. **Explains causality.** Not "Docker is using 39% CPU" but "Docker Desktop's Linux VM reserved 8GB of your 16GB RAM. Five containers inside it are idle. Combined with 96 days of uptime and no reboot, swap has grown to 15GB. The evidence suggests this is a likely main contributor to slowness."
 
-2. **Identifies waste vs. legitimate work.** A video encoder using 90% CPU is normal. A Docker VM using 39% CPU with zero active containers is waste. Otter distinguishes these using process lineage, container state, port activity, and sampling trends.
+2. **Identifies waste vs. legitimate work.** A video encoder using 90% CPU is normal. A Docker VM using 39% CPU with zero active containers is waste. Otter distinguishes these using process lineage, container state, listening port status, and sampling trends.
 
 3. **Proposes specific, guarded cleanup actions.** Each recommendation shows exact targets, expected resource savings, locally-derived risk level, and what else might be affected. The user confirms each action individually. Otter then executes only allowlisted targets: idle containers and user-owned stale dev servers with no active children.
 
@@ -29,10 +29,10 @@ Otter never runs as a background daemon. It never cleans without explicit per-ac
 ## Goals
 
 * **Plain-language diagnosis.** Given a system snapshot, produce a report a developer can read in under 30 seconds and understand: what is wrong, why, and what to do.
-* **Cross-system causal reasoning.** Connect Docker VM memory, container idle state, swap growth, process lineage, port staleness, and uptime into a coherent explanation rather than isolated metrics.
-* **Guarded execution.** After individual user confirmation, execute narrowly-scoped cleanup: stop idle containers, kill user-owned stale dev servers. Every action shows blast radius before confirmation and is revalidated immediately before execution. Risk levels are derived from local system facts, not LLM output.
+* **Cross-system causal reasoning.** Connect Docker VM memory, container idle state, current swap usage, process lineage, listening ports, and uptime into a coherent explanation rather than isolated metrics.
+* **Guarded execution.** After individual user confirmation, execute narrowly-scoped cleanup: stop containers explicitly labeled as disposable, kill user-owned stale dev servers. Every action shows blast radius before confirmation and is revalidated immediately before execution. Risk levels are derived from local system facts, not LLM output.
 * **Privacy by default.** Redact process arguments, project paths, and sensitive tokens before sending anything to an LLM. Show the user exactly what payload will leave their machine. Support a local-only mode.
-* **Fast enough to be useful when it matters.** The tool runs when the machine is already under pressure. Total time from invocation to report should be under 60 seconds, with collection capped at 10 seconds.
+* **Fast enough to be useful when it matters.** The tool runs when the machine is already under pressure. Total time from invocation to report should be under 60 seconds. The global run deadline is 45s; collection is capped at 15s; LLM analysis gets the remaining budget. Retries only if they fit within the global deadline.
 * **Debuggable and auditable.** Every diagnostic run produces a local trace: what was collected, what was redacted, what the LLM said, what was validated, what the user confirmed, and what was executed.
 
 ## Non-Goals
@@ -120,13 +120,13 @@ The collector gathers data over a 2-10 second window (configurable via `--window
 
 | Data | Command | Output |
 |------|---------|--------|
-| Process list | `ps -eo pid,ppid,pgid,user,%cpu,%mem,rss,vsz,lstart,etime,cputime,command` | Tab-separated, parsed into `ProcessInfo[]` |
+| Process list | `ps -eo pid,ppid,pgid,user,stat,tt,%cpu,%mem,rss,vsz,lstart,etime,cputime,command` | Fixed-width columns, parsed into `ProcessInfo[]` with state and controlling terminal |
 | Process tree | Derived from `ppid` relationships | `ProcessNode` tree structure |
 | Memory pressure | `memory_pressure` + `vm_stat` | `MemoryStats` with free/active/inactive/compressed/wired |
 | Swap | `sysctl vm.swapusage` | Total, used, free |
-| System load | `sysctl vm.loadavg` + `host_processor_info` | 1/5/15 min load averages, per-core CPU |
+| System load | `sysctl vm.loadavg` | 1/5/15 min load averages (per-core CPU requires Mach API, deferred to v2) |
 | Listening ports | `lsof -iTCP -sTCP:LISTEN -n -P` | `PortBinding[]` with PID, port, protocol |
-| Docker containers | `docker ps --format json` + `docker stats --no-stream --format json` (run twice, window-separated) | `ContainerInfo[]` with state, interval CPU, memory |
+| Docker containers | `docker ps --format json` + `docker inspect --format json <id>` + `docker stats --no-stream --format json` (run twice) | `ContainerInfo[]` with state, restart policy, health, interval CPU, memory |
 | Uptime | `sysctl kern.boottime` | Boot timestamp, uptime duration |
 
 **CPU interval measurement:** The collector takes two `ps` samples separated by the sampling window. For each process present in both samples, interval CPU is calculated as:
@@ -141,7 +141,7 @@ This uses `cputime` deltas rather than the `%cpu` column, because BSD `ps %cpu` 
 
 Each collector adapter:
 
-- Has a **timeout** (default 3s per source, 10s total collection budget)
+- Has a **timeout** calculated as `window_seconds + 5s overhead` (e.g., 3s window → 8s timeout). Total collection budget is 15s.
 - Reports **collector status** with error details
 - Produces a **typed, versioned** output object
 - Is **testable in isolation** via fixture files (pre-captured command output)
@@ -157,21 +157,110 @@ The normalizer combines collector outputs into a versioned `SystemSnapshot`:
 ```typescript
 interface SystemSnapshot {
   schema_version: "1.0"
-  collected_at: string          // ISO 8601
+  collected_at: string
   collection_window_seconds: number
-  machine: MachineInfo          // arch, cpu_cores, total_memory_gb, macos_version, uptime
-  memory: MemoryStats           // free, active, inactive, compressed, wired, swap
-  load: LoadStats               // 1/5/15 min averages, per-core usage over window
-  processes: ProcessInfo[]      // full process list with lineage (see payload tiering below)
-  ports: PortBinding[]          // listening TCP ports with owning PID
-  docker: DockerState           // daemon status, containers with stats
-  collector_status: CollectorStatus[]  // per-source completeness/errors
+  machine: MachineInfo
+  memory: MemoryStats
+  load: LoadStats
+  processes: ProcessInfo[]
+  ports: PortBinding[]
+  docker: DockerState
+  collector_status: CollectorStatus[]
+}
+
+interface MachineInfo {
+  arch: "arm64" | "x86_64"
+  cpu_cores: number              // logical cores via sysctl hw.ncpu
+  total_memory_gb: number        // via sysctl hw.memsize
+  macos_version: string          // via sysctl kern.osproductversion
+  boot_time: string              // via sysctl kern.boottime, ISO 8601
+  uptime_hours: number
+}
+
+interface MemoryStats {
+  free_mb: number                // vm_stat free + speculative pages
+  active_mb: number
+  inactive_mb: number
+  compressed_mb: number
+  wired_mb: number
+  swap_total_mb: number          // sysctl vm.swapusage
+  swap_used_mb: number
+  page_size_bytes: number        // vm_stat page size (typically 16384)
+}
+
+interface LoadStats {
+  load_1min: number              // sysctl vm.loadavg
+  load_5min: number
+  load_15min: number
+}
+
+interface ProcessInfo {
+  pid: number
+  ppid: number
+  pgid: number                   // kept for future group features; v1 kills single PID only
+  user: string
+  state: string                  // ps stat column (e.g., "Ss", "R+", "Z")
+  controlling_terminal: string   // ps tt column ("??" = no terminal)
+  lifetime_cpu_percent: number   // ps %cpu (lifetime average, informational only)
+  memory_percent: number         // ps %mem
+  rss_mb: number
+  vsz_mb: number
+  start_time: string             // ps lstart, ISO 8601
+  elapsed: string                // ps etime (e.g., "12-03:52:26")
+  cpu_time: string               // ps cputime (e.g., "45:12.03")
+  interval_cpu_percent: number | null  // Calculated from two samples; null for new/exited
+  command: string                // full command line
+  entity_id: string              // proc_<uuid>, assigned at snapshot build
+}
+
+interface PortBinding {
+  pid: number
+  port: number
+  protocol: "tcp"
+  process_name: string
+  address: string                // e.g., "127.0.0.1" or "*"
+}
+
+interface DockerState {
+  daemon_available: boolean      // docker info exit code 0
+  daemon_version: string | null
+  vm_process: VmProcessInfo | null
+  containers: ContainerInfo[]
+}
+
+interface VmProcessInfo {
+  pid: number
+  rss_mb: number
+  cpu_percent: number            // interval CPU from two ps samples
+  reserved_memory_mb: number | null   // from docker system info
+  reserved_cpus: number | null
+  detection_method: "process_name" | "docker_info" | "docker_virtualization" | "unknown"
+}
+
+interface ContainerInfo {
+  id: string                     // full container ID
+  name: string
+  image: string
+  state: "running" | "paused" | "exited" | "restarting"
+  health: "healthy" | "unhealthy" | "starting" | "none"
+  restart_policy: "no" | "always" | "unless-stopped" | "on-failure"
+  interval_cpu_percent: number | null  // from two docker stats samples
+  memory_usage_mb: number
+  entity_id: string              // container_<uuid>
+  labels: Record<string, string>      // includes otter.disposable if present
+}
+
+interface CollectorStatus {
+  name: string
+  status: "complete" | "partial" | "failed" | "skipped" | "denied"
+  error: string | null
+  duration_ms: number
 }
 ```
 
 The full process list is retained locally for safety checks (child process validation, process group resolution). For the LLM payload, processes are grouped:
 
-- **Detail tier:** Top 50 processes by CPU × memory composite score, sent with full metadata
+- **Detail tier:** Top 25 by interval CPU + top 25 by RSS (deduplicated union, sent with full metadata after redaction)
 - **Candidate tier:** Every user-owned process with a listening port, runtime > 4 hours, or no controlling terminal — always sent with full metadata regardless of resource ranking (ensures stale dev-server candidates are never hidden)
 - **Summary tier:** Remaining processes grouped by executable name, sent as aggregate entries (e.g., `node: 12 processes, total 2.1GB RSS, avg 3% CPU`)
 
@@ -192,13 +281,43 @@ Before sending to the LLM, the redactor transforms the snapshot:
 | Port numbers | Keep (needed for diagnosis, not sensitive alone) |
 | File paths | Hash all directories, keep only basename (`~/worktrees/project-x/src/index.ts` → `[HASH]/[HASH]/index.ts`) |
 
+**Redaction specifics:**
+
+- **Hash algorithm:** SHA-256, deterministic within a single run (same input → same hash), salted with run ID. Hashes are 8-character prefixes (e.g., `a3f2b1c4`).
+- **Path transformation order:** (1) expand `~` to literal home path, (2) replace home path with `[HOME]`, (3) hash each path segment except the final filename, (4) truncate command to 200 chars AFTER redaction (not before).
+- **API key patterns:** `sk-[a-zA-Z0-9]{20,}`, `Bearer\s+[a-zA-Z0-9._-]+`, `--token[= ]\S+`, `--key[= ]\S+`, `--password[= ]\S+`, `ghp_[a-zA-Z0-9]{36}`, `github_pat_[a-zA-Z0-9_]{82}`.
+- **Container name allowlist:** `redis`, `mysql`, `postgres`, `mongo`, `nginx`, `node`, `python`, `alpine`, `busybox`, `ubuntu`, `debian`. All others are hashed.
+- **IPv6:** Match `[0-9a-f:]+:[0-9a-f:]+` pattern and replace with `[IPv6]`.
+
 **Residual risk:** Regex-based redaction cannot catch all sensitive value formats. Known gaps include: database connection strings with embedded credentials, internal service names that match common words, and base64-encoded tokens. The `--preview-payload` flag exists so users can inspect the outbound payload before trusting the pipeline. The trace records every redaction rule applied.
 
 The redacted payload is written to the run trace. `otter scan` always shows a payload summary and asks for consent before sending to the LLM. `--preview-payload` shows the full redacted payload and exits before the LLM step (same snapshot, just stops earlier).
 
 ### LLM Analyzer
 
-The analyzer sends the redacted snapshot with a versioned prompt that instructs the model to:
+The analyzer sends the redacted snapshot with a versioned prompt. The v1 prompt template:
+
+```text
+You are Otter, a macOS resource diagnostician. Analyze the system snapshot below.
+
+RULES:
+- Distinguish measured facts from hypotheses. Use hedged language ("likely", "may indicate") for unsupported inference.
+- Identify waste vs. legitimate work: a compiler using CPU is normal; an idle dev server with a stale port is waste.
+- Connect cross-system patterns: Docker VM reservation + idle containers + current swap usage.
+- Only recommend actions from the allowlist: stop_container, kill_process.
+- Reference entities by their entity_id from the snapshot.
+
+OUTPUT (JSON):
+{
+  "summary": "<one-paragraph diagnosis in plain language>",
+  "findings": [{"id": "...", "severity": "info|warning|critical", "evidence_level": "measured|supported_hypothesis|unsupported_inference", "title": "...", "explanation": "...", "evidence_refs": ["entity_id or metric path"]}],
+  "recommendations": [{"id": "...", "action_type": "stop_container|kill_process", "target_ref": {"kind": "process|container", "entity_id": "..."}, "reason": "...", "expected_benefit": "..."}]
+}
+
+For explain mode, omit the recommendations array entirely.
+```
+
+**Model parameters:** `gpt-4o-mini`, `response_format: { type: "json_object" }`, `temperature: 0.1`, `max_tokens: 2000`. The analyzer uses:
 
 1. Identify resource anomalies (things consuming more than expected for their type)
 2. Explain causal chains (Docker VM + idle containers + no reboot → swap growth)
@@ -249,7 +368,7 @@ After the LLM returns recommendations, local code validates each one:
 1. **Schema check**: Recommendation conforms to the typed interface
 2. **Target resolution**: `target_ref` maps to a real entity in the snapshot
 3. **Safety check**: Target is not a system process, root-owned process, or parent with active children
-4. **Revalidation**: Immediately before execution, re-check that the PID still exists with the same start time and command line, or the container still has the same ID and state
+4. **Revalidation**: Immediately before execution, re-run the FULL safety predicate with fresh data: re-check PID exists with same start time and command line, re-check ownership (still user-owned), re-check no active children have appeared, re-check launchd status unchanged, re-check container still idle with same restart policy. Before SIGKILL fallback, re-verify PID identity has not changed.
 
 The user sees each recommendation individually with its risk level, blast radius, and expected benefit. They approve or reject each one via `@clack/prompts` confirmations. Dangerous actions require typing the target name to confirm.
 
@@ -267,12 +386,38 @@ All three risk levels are executable. The escalating confirmation friction refle
 
 | Classification | Definition |
 |---------------|-----------|
-| Idle container | Interval CPU < 2% (calculated from two `docker stats` samples) + no health-check failure + restart policy is not `always` or `unless-stopped` |
+| Idle container | Interval CPU < 2% (two `docker stats` samples) + no health-check failure + restart policy not `always`/`unless-stopped` + container has label `otter.disposable=true` or is in a compose project labeled `disposable` |
 | Stale process | User-owned + listening port present + CPU < 1% + runtime > 8 hours + no controlling terminal (`TT` is `??`) |
 | Active child | Any process whose `ppid` matches the target's `pid` and is still alive at validation time |
-| Protected process | Owned by root or system users (`_windowserver`, `_mds`, etc.), OR appears in `launchctl list` as a labeled service, OR has active children. Note: PPID=1 alone does not count as launchd-managed — orphaned processes are not protected |
+| Protected process | Owned by root or system users (`_windowserver`, `_mds`, etc.), OR appears in `launchctl list` (user domain) or `launchctl print system` (system domain) as a labeled service with matching PID, OR has active children. Note: PPID=1 alone does not count as launchd-managed — orphaned processes are not protected |
 
 These thresholds are implemented in `validator/safety.ts` as deterministic checks. The LLM can suggest, but only these local rules decide.
+
+**ValidatedRecommendation contract:**
+
+```typescript
+interface ValidatedRecommendation {
+  recommendation: Recommendation      // Original LLM output
+  resolved_target: ResolvedTarget     // Concrete PID or container ID
+  eligibility: EligibilityResult      // Pass/fail per safety check
+  local_risk_level: "safe" | "caution" | "dangerous"  // Derived from system facts
+  local_blast_radius: string          // Computed from process tree / container state
+  measured_benefit: string            // Based on actual RSS/CPU of target
+}
+
+interface EligibilityResult {
+  is_user_owned: boolean
+  has_active_children: boolean
+  is_launchd_managed: boolean
+  is_idle_container: boolean
+  unknown_state: boolean              // If any check couldn't complete, block
+}
+
+// Risk mapping: idle container + no children → safe
+//              stale process + no children → safe
+//              process with exited children → caution
+//              anything with unknown state → dangerous (blocked from execution)
+```
 
 Execution uses fixed code paths, not LLM-generated commands:
 
@@ -320,14 +465,16 @@ otter trace export <run-id>   # Export trace with strict sanitization (omits pro
 | Mode | Collects | LLM Call | Output | Prompts | Executes |
 |------|----------|----------|--------|---------|----------|
 | `scan` (default, TTY) | Yes | Yes | Terminal report | Payload consent + per-action | Yes |
-| `scan --json` | Yes | Yes | JSON | Never | Never |
+| `scan --json` | Yes | No* | JSON | Never | Never |
 | `scan --preview-payload` | Yes | No | Redacted payload | No | No |
 | `scan --local-only` | Yes | No | Raw metrics table | No | No |
 | `scan --yes` | Yes | Yes | Terminal report | Skips payload consent | Yes |
 | `scan --no-exec` | Yes | Yes | Terminal report | Payload consent only | No |
-| Non-TTY (no flags) | Yes | Yes | JSON | Never | Never |
+| Non-TTY (no flags) | Yes | No* | JSON | Never | Never |
 
 **Exit codes:** `0` = success, `1` = partial failure (some collectors failed), `2` = fatal error, `3` = user cancelled, `4` = no API key configured.
+
+**Non-interactive LLM policy:** `*` Non-interactive modes (`--json`, non-TTY, `--yes` without prior consent) default to **no LLM transmission**. They produce a local-only report. To send data to the LLM from a non-interactive context, the user must explicitly pass `--send-llm`, which acknowledges payload transmission. This preserves the invariant that process data never leaves the machine without explicit consent.
 
 **Command semantics:**
 
@@ -342,7 +489,7 @@ Traces are stored in `~/.otter/traces/` as JSONL files, one per run. Traces stor
 ```text
 ~/.otter/
   traces/
-    2026-10-30T14-22-01_scan.jsonl    # One run, one file
+    20261030T142201-a3f2b1_scan.jsonl  # timestamp + random suffix to prevent collisions
     2026-10-30T15-01-33_scan.jsonl
   settings.json                         # Preferences (no secrets stored here)
 ```
@@ -372,7 +519,7 @@ User confirmation inputs (typed target names) are passed through the same redact
 
 **Provider:** OpenAI only in v1. The model is configurable in `settings.json` (default: `gpt-4o-mini`).
 
-**API key storage:** macOS Keychain via `security add-generic-password -s otter -a api-key`. Otter reads it at runtime with `security find-generic-password -s otter -a api-key -w`. The key is never written to disk in plaintext, never included in traces, and never sent anywhere except OpenAI's API.
+**API key storage:** macOS Keychain via `security add-generic-password -U -s otter -a api-key` (the `-U` flag updates existing entries). Otter reads it at runtime with `security find-generic-password -s otter -a api-key -w`. The API key is passed to OpenAI via the SDK's constructor (in-memory), never via command-line argv. `otter config set-api-key` prompts via stdin, not argv. The key is never written to disk in plaintext, never included in traces, and never sent anywhere except OpenAI's API.
 
 **First-run behavior:** If no API key is found, Otter prints setup instructions and exits with code `1`. The user runs `otter config set-api-key` to store the key.
 
@@ -440,7 +587,12 @@ otter/
     cli/
       commands/
         scan.ts
+        explain.ts
+        clean.ts
+        config.ts
         trace.ts
+    config/
+      settings.ts
     collectors/
       types.ts
       system.ts
@@ -474,12 +626,22 @@ otter/
       store.ts
   tests/
     fixtures/
-      ps-output.txt
+      ps-sample-1.txt
+      ps-sample-2.txt
       lsof-output.txt
+      lsof-denied.txt
       vm-stat-output.txt
-      docker-ps.json
-      docker-stats.json
       memory-pressure-output.txt
+      sysctl-machine.txt
+      sysctl-boottime.txt
+      sysctl-swapusage.txt
+      sysctl-loadavg.txt
+      docker-ps.json
+      docker-stats-1.json
+      docker-stats-2.json
+      docker-inspect.json
+      docker-info-down.json
+      launchctl-list.txt
     collectors/
       process.test.ts
       memory.test.ts
@@ -491,6 +653,17 @@ otter/
       response.test.ts
     validator/
       safety.test.ts
+      resolver.test.ts
+      revalidate.test.ts
+    snapshot/
+      builder.test.ts
+    executor/
+      actions.test.ts
+      verify.test.ts
+    trace/
+      store.test.ts
+    cli/
+      modes.test.ts
 ```
 
 ### File-by-File Plan
@@ -499,9 +672,9 @@ otter/
 
 | File | What Changes | Why |
 |------|-------------|-----|
-| `package.json` | Create. Define project name `otter`, version `0.1.0`, dependencies: `commander`, `@clack/prompts`, `picocolors`, `cli-table3`, `zod`, `openai`. Add scripts: `dev`, `build`, `test`. | Project manifest, dependency declaration, build/test entry points. |
-| `tsconfig.json` | Create. Target ES2022, module ESNext, strict mode, outDir `./dist`. | TypeScript compilation config with full type checking. |
-| `bunfig.toml` | Create. Set test preload for path aliases, configure build target as standalone binary. | Bun runtime and build configuration. |
+| `package.json` | Create. Project `otter` v0.1.0. Dependencies: `commander@^12`, `@clack/prompts@^0.7`, `picocolors@^1`, `cli-table3@^0.6`, `zod@^3`, `openai@^4`, `@types/bun@^1` (dev). Scripts: `dev: bun run src/index.ts`, `build: bun build src/index.ts --compile --outfile dist/otter`, `test: bun test`. Lockfile: `bun.lockb` committed. | Project manifest with pinned versions and reproducible builds. |
+| `tsconfig.json` | Create. Target ES2022, module ESNext, moduleResolution: `bundler`, strict mode, types: `["bun-types"]`, no outDir (Bun handles compilation). | TypeScript config for Bun's bundler resolution and runtime types. |
+| `bunfig.toml` | Create. Minimal: test preload if path aliases needed. Standalone binary is built via `bun build --compile` in package.json script, not bunfig. | Bun runtime configuration. |
 | `.gitignore` | Create. Ignore `node_modules/`, `dist/`, `*.local`, `.env`, `coverage/`. | Prevent committing build artifacts and secrets. |
 | `README.md` | Create. Project overview, install instructions, usage examples, development setup. | Entry point for GitHub visitors and new contributors. |
 
@@ -509,12 +682,13 @@ otter/
 
 | File | What Changes | Why |
 |------|-------------|-----|
-| `src/index.ts` | Create. Set up Commander program with `scan` and `trace` subcommands. Parse global options (`--json`, `--local-only`, `--preview-payload`, `--window`). Dispatch to command handlers. Exit with appropriate codes (0 = success, 1 = partial failure, 2 = fatal error). | Single entry point; routes CLI invocations to command logic. |
+| `src/index.ts` | Create. Set up Commander program with `scan`, `explain`, `clean`, `config`, and `trace` subcommands. Parse global options (`--json`, `--local-only`, `--preview-payload`, `--yes`, `--no-exec`, `--send-llm`, `--window`). Dispatch to command handlers. Exit codes: 0 = success, 1 = partial failure, 2 = fatal, 3 = cancelled, 4 = no API key. | Single entry point; routes CLI invocations to command logic. |
 | `src/cli/commands/scan.ts` | Create. Orchestrate full pipeline: collect → normalize → redact → analyze (or skip with `--local-only`) → validate → report → optionally confirm and execute. Manage timing budget across stages. Handle SIGINT gracefully (save partial trace). | Core diagnostic workflow; the primary command most users interact with. |
 | `src/cli/commands/explain.ts` | Create. Same as scan but skips recommendation generation and execution prompts. Outputs findings only. | Supports diagnosis without cleanup suggestions. |
 | `src/cli/commands/clean.ts` | Create. Semantic alias for scan. Delegates to same pipeline. | Matches user mental model of cleanup. |
 | `src/cli/commands/config.ts` | Create. Subcommand `set-api-key` stores in macOS Keychain. Subcommand `show` displays settings (redacted). | Secure first-run setup. |
-| `src/cli/commands/trace.ts` | Create. Subcommands: `list` (show recent runs), `show <id>` (display full trace), `export <id>` (output as JSON). Read from trace store. | Debugging and audit trail access. |
+| `src/cli/commands/trace.ts` | Create. Subcommands: `list` (show recent runs), `show <id>` (display full trace), `export <id>` (output strictly sanitized JSON). Read from trace store. | Debugging and audit trail access. |
+| `src/config/settings.ts` | Create. Read/write `~/.otter/settings.json` with 0600 permissions. Schema: `{ model: string, enable_execution: boolean }`. Defaults: `gpt-4o-mini`, `false`. | Persistent user configuration without secrets. |
 
 #### Collectors
 
@@ -524,8 +698,8 @@ otter/
 | `src/collectors/system.ts` | Create. Collect machine info (arch, CPU cores, total RAM, macOS version) via `sysctl`. Collect uptime via `sysctl kern.boottime`. Collect load averages via `sysctl vm.loadavg`. | Baseline machine context needed for diagnosis. |
 | `src/collectors/process.ts` | Create. Run `ps -eo pid,ppid,pgid,user,%cpu,%mem,rss,vsz,lstart,etime,cputime,command` twice. Compute interval CPU from cputime deltas. Build full process tree. Return complete list for safety checks. | Primary diagnostic data; accurate interval CPU and full lineage. |
 | `src/collectors/memory.ts` | Create. Run `memory_pressure` for percentage, `vm_stat` for page-level detail, `sysctl vm.swapusage` for swap state. Parse into `MemoryStats` with free, active, inactive, compressed, wired, swap total/used. | Memory pressure is the most common Mac slowdown cause. |
-| `src/collectors/ports.ts` | Create. Run `lsof -iTCP -sTCP:LISTEN -n -P`. Parse into `PortBinding[]` with PID, port, protocol, process name. Handle permission-denied gracefully (report `partial`). | Identifies stale dev servers and service conflicts. |
-| `src/collectors/docker.ts` | Create. Check if Docker daemon is reachable via `docker info --format json`. If reachable, run `docker ps --format json` and `docker stats --no-stream --format json` twice (window-separated for interval calculation). Map containers to host processes via Docker Desktop's VM process. If Docker unavailable, report `skipped`. | Docker is the single largest resource consumer in typical developer setups. |
+| `src/collectors/ports.ts` | Create. Run `lsof -iTCP -sTCP:LISTEN -n -P`. Parse into `PortBinding[]` with PID, port, protocol, process name. Classify errors: exit code 1 with "Operation not permitted" → `denied`; partial output with some rows → `partial` with available data; connection timeout → `failed`. | Identifies stale dev servers and service conflicts. |
+| `src/collectors/docker.ts` | Create. Check if Docker daemon is reachable via `docker info` exit code (0 = reachable, 1 = daemon down, regardless of JSON output). If reachable, run `docker ps --format json` and `docker stats --no-stream --format json` twice (window-separated for interval calculation). Map containers to host processes via Docker Desktop's VM process. If Docker unavailable, report `skipped`. | Docker is the single largest resource consumer in typical developer setups. |
 | `src/collectors/index.ts` | Create. Orchestrate all collectors in parallel with `Promise.allSettled`. Enforce total budget (default 10s). Return `CollectionResult` with per-collector status. | Single entry point for collection; parallel execution minimizes wall time. |
 
 #### Snapshot
@@ -555,7 +729,7 @@ otter/
 | File | What Changes | Why |
 |------|-------------|-----|
 | `src/validator/safety.ts` | Create. Given a `Recommendation` and the current `SystemSnapshot`, check: target is user-owned (not root/system), target has no active child processes (for kill actions), container is actually idle (for stop actions), process is not a labeled launchd service (via `launchctl list`). Return pass/fail per check with reasons. | Deterministic local safety checks independent of LLM judgment. |
-| `src/validator/resolver.ts` | Create. Given a `target_ref` string, resolve to concrete PID or container ID by looking up snapshot entities. Return `ResolvedTarget` with full identity (PID, start time, command line, container ID). | Bridges LLM abstract references to concrete system targets. |
+| `src/validator/resolver.ts` | Create. Given a typed `EntityRef`, resolve to concrete PID or container ID by looking up snapshot entities. Return `ResolvedTarget` with full identity (PID, start time, command line, container ID). | Bridges LLM abstract references to concrete system targets. |
 | `src/validator/revalidate.ts` | Create. Immediately before execution, re-run minimal collection: check PID exists, start time matches, command line matches, container ID and state unchanged. Return `RevalidationResult` (ok / target_changed / target_gone). | Prevents TOCTOU attacks and stale-snapshot mistakes. |
 
 #### Executor
@@ -576,7 +750,7 @@ otter/
 
 | File | What Changes | Why |
 |------|-------------|-----|
-| `src/trace/types.ts` | Create. Define `TraceEvent` union type: `CollectionStarted`, `CollectionCompleted`, `RedactionApplied`, `LLMRequestSent`, `LLMResponseReceived`, `RecommendationsValidated`, `UserConfirmed`, `ActionExecuted`, `ActionVerified`, `RunCompleted`, `RunFailed`. Each event has run ID, sequence number, timestamp. | Typed event schema for the audit trail. |
+| `src/trace/types.ts` | Create. Define `TraceEvent` union type: `collection_started`, `collection_completed`, `redaction_applied`, `llm_request_sent`, `llm_response_received`, `recommendations_validated`, `user_confirmed`, `action_executed`, `action_verified`, `run_completed`, `run_failed` (all snake_case). Each event has run ID, sequence number, timestamp. | Typed event schema for the audit trail. |
 | `src/trace/store.ts` | Create. Write events to `~/.otter/traces/<run-id>.jsonl` (append mode). Implement `list()`, `show(id)`, `export(id)`. Auto-rotate: keep newest 100 files, delete older. | Persistent local audit; users can debug and share runs. |
 
 #### Tests and Fixtures
@@ -597,17 +771,39 @@ otter/
 | `tests/analyzer/response.test.ts` | Create. Test LLM response validation: valid report passes, malformed JSON fails, hallucinated target refs rejected, missing evidence refs rejected. | Prevents unvalidated LLM output from reaching users. |
 | `tests/validator/safety.test.ts` | Create. Test safety checks: root process rejected, system process rejected, process with children rejected, idle container approved. | Prevents dangerous executions. |
 
+### Rollout Gating
+
+Execution is feature-flagged. The default configuration disables execution until diagnosis quality is validated:
+
+1. **Phase 1 (v0.1):** Read-only diagnosis. `scan` and `explain` produce reports. `clean` prints recommendations but does not execute. Feature flag: `enable_execution: false` (default).
+2. **Phase 2 (v0.2):** After evaluating report quality against real snapshots, flip default to `enable_execution: true`. Users can still disable via settings.
+
+This staging ensures the highest-risk capability (destructive execution) only ships after the core diagnostic value is proven.
+
 ### Implementation Order
 
-Build in this sequence, with each step producing a testable artifact:
+Build in this sequence. Each step has an explicit verification command and expected output. Later steps depend on earlier ones being complete.
 
-1. **Project scaffold**: `package.json`, `tsconfig.json`, `bunfig.toml`, `.gitignore`, `README.md`, `src/index.ts` with stub commands. Verify: `otter --help` works.
-2. **System + process collectors**: `collectors/types.ts`, `system.ts`, `process.ts`, `memory.ts`. Fixture tests for parsing. Verify: `otter scan --local-only --json` produces raw collector output.
-3. **Ports + Docker collectors**: `ports.ts`, `docker.ts`, fixture tests. Verify: snapshot includes port and Docker data.
-4. **Snapshot schema + builder**: `snapshot/schema.ts`, `builder.ts`. Verify: full snapshot validates against Zod schema. (Note: step 2 outputs raw collector data; step 4 adds the validated combined snapshot.)
-5. **Redactor**: `redactor/rules.ts`, `redact.ts`, tests. Verify: `otter scan --preview-payload` shows redacted output.
-6. **LLM analyzer**: `analyzer/prompt.ts`, `llm.ts`, `response.ts`. Verify: `otter scan` produces a plain-language report.
-7. **Validator**: `validator/safety.ts`, `resolver.ts`, `revalidate.ts`, tests. Verify: recommendations with unsafe targets are rejected.
-8. **Reporter**: `reporter/terminal.ts`, `json.ts`. Verify: terminal output is readable, JSON output is valid.
-9. **Executor**: `executor/actions.ts`, `verify.ts`. Verify: confirmed actions execute against test containers.
-10. **Trace**: `trace/types.ts`, `store.ts`. Verify: `otter trace list` and `otter trace show` work.
+1. **Project scaffold + config**: `package.json` (with pinned versions + lockfile), `tsconfig.json` (bundler resolution, Bun types), `bunfig.toml`, `.gitignore`, `src/index.ts` with all subcommands (scan/explain/clean/config/trace) as stubs, `src/config/settings.ts` (settings.json read/write with 0600 permissions). Verify: `otter --help` prints usage, exit 0.
+
+2. **Trace store**: `src/trace/types.ts`, `src/trace/store.ts`. Create `~/.otter/traces/` with 0700 permissions. Run IDs are `YYYYMMDDTHHMMSS-<random-6>` to prevent collisions. Event types use snake_case consistently. Verify: `otter trace list` shows empty list, exit 0.
+
+3. **System + memory collectors**: `collectors/types.ts`, `system.ts`, `memory.ts`. Parse `sysctl` output for machine info, `memory_pressure`, `vm_stat`, `vm.swapusage`. Verify: `otter scan --local-only --json` outputs `MachineInfo` and `MemoryStats` as valid JSON, exit 0.
+
+4. **Process collector**: `collectors/process.ts`. Run `ps -eo pid,ppid,pgid,user,stat,tt,%cpu,%mem,rss,vsz,lstart,etime,cputime,command` twice. Parse fixed-width columns. Calculate interval CPU from cputime deltas. Build full process tree. Verify: fixture test parses sample `ps` output correctly, interval CPU calculation verified against known values.
+
+5. **Ports + Docker collectors**: `ports.ts`, `docker.ts`. Parse `lsof` output (handle `denied` vs `partial`). Docker: check daemon via `docker info` exit code, `docker ps --format json`, `docker inspect` for restart policy/health/labels, `docker stats --no-stream` twice for interval. VM detection via three strategies with fallback. Verify: fixture tests pass for all parsers including error cases.
+
+6. **Snapshot schema + builder**: `snapshot/schema.ts` (full Zod schema with all nested types), `builder.ts` (assigns entity IDs, validates). Verify: `otter scan --local-only --json` outputs complete `SystemSnapshot` that validates against schema.
+
+7. **Redactor + payload tiering**: `redactor/rules.ts` (SHA-256 deterministic per-run hashes, regex patterns, exact allowlists), `redact.ts` (applies rules + three-tier payload: detail top-25-by-CPU + top-25-by-RSS deduplicated, candidate tier for user-owned+port-listening+4h-runtime, summary tier for rest). Verify: `otter scan --preview-payload` shows redacted JSON, no raw paths/args visible, exit 0.
+
+8. **Reporter + local-only**: `reporter/terminal.ts`, `json.ts`. Terminal renders metrics table, findings with severity colors, recommendations with risk badges. JSON serializes full report. Local-only mode outputs raw metrics table. Verify: `otter scan --local-only` renders readable table to stderr, exit 0; `otter scan --local-only --json` outputs JSON to stdout, exit 0.
+
+9. **Config + LLM analyzer**: `cli/commands/config.ts` (Keychain with `-U` flag, secret via stdin not argv), `analyzer/prompt.ts` (v1 template above, explain variant), `llm.ts` (OpenAI with structured output), `response.ts` (Zod validation, entity ref checking, fallback to local summary). Verify: `otter config set-api-key` stores in Keychain; `otter explain --send-llm` produces valid JSON report, exit 0 (requires API key).
+
+10. **Validator**: `validator/safety.ts` (full predicate: ownership, children, launchd via `launchctl list` + `launchctl print system`, container idle+disposable), `resolver.ts` (typed EntityRef resolution), `revalidate.ts` (full re-predicate before execution, PID re-verify before SIGKILL). Verify: fixture tests reject root process, process with children, non-disposable container; approve stale disposable process.
+
+11. **Executor + verifier**: `executor/actions.ts` (stop_container via docker stop, kill_process via SIGTERM→3s→verify identity→SIGKILL), `verify.ts` (3s post-action sample labeled "short-term observation"). Feature flag `enable_execution` defaults to `false`. Verify: with flag enabled, `otter clean` against a test `docker run -d --label otter.disposable=true alpine sleep 60` stops it and reports `ExecutionResult.status: "succeeded"`.
+
+12. **Scan/clean/explain full pipeline**: `cli/commands/scan.ts` orchestrates full flow with global deadline enforcement. `explain.ts` and `clean.ts` delegate to shared pipeline with mode flags. Verify: end-to-end test produces trace file, report, and exit 0 in all three modes.
