@@ -70,6 +70,16 @@ Otter is a single CLI binary backed by a modular pipeline. Each stage is a separ
 
 Every stage writes to an immutable **run trace** (JSONL file in `~/.otter/traces/`). The trace records inputs, outputs, timing, errors, and redaction decisions for every invocation. This makes bad reports debuggable and builds user trust.
 
+### Diagnosis Confidence Contract
+
+Otter's report distinguishes three evidence levels. Every finding must state which level it operates at:
+
+- **Measured fact**: A value directly observed in the snapshot (e.g., "Docker VM process uses 1.2GB RSS", "swap usage is 11GB").
+- **Supported hypothesis**: A causal claim where the evidence is present but not conclusive (e.g., "swap accumulation is likely driven by Docker's 8GB reservation combined with 96 days of uptime").
+- **Unsupported inference**: A pattern the LLM recognizes but the snapshot cannot confirm (e.g., "this process may be a stale dev server").
+
+The LLM prompt requires each finding to carry an `evidence_level` field. The reporter renders unsupported inferences with visible hedging ("possibly", "may indicate") and never attaches executable recommendations to them.
+
 ### Technology Stack
 
 **Language: TypeScript, compiled to a standalone binary via Bun.**
@@ -93,7 +103,7 @@ The collector gathers data over a 2-10 second window (configurable via `--window
 
 | Data | Command | Output |
 |------|---------|--------|
-| Process list | `ps -eo pid,ppid,user,%cpu,%mem,rss,vsz,etime,command` | Tab-separated, parsed into `ProcessInfo[]` |
+| Process list | `ps -eo pid,ppid,pgid,user,%cpu,%mem,rss,vsz,lstart,etime,cputime,command` | Tab-separated, parsed into `ProcessInfo[]` |
 | Process tree | Derived from `ppid` relationships | `ProcessNode` tree structure |
 | Memory pressure | `memory_pressure` + `vm_stat` | `MemoryStats` with free/active/inactive/compressed/wired |
 | Swap | `sysctl vm.swapusage` | Total, used, free |
@@ -102,12 +112,24 @@ The collector gathers data over a 2-10 second window (configurable via `--window
 | Docker containers | `docker ps --format json` + `docker stats --no-stream --format json` | `ContainerInfo[]` with state, CPU, memory |
 | Uptime | `sysctl kern.boottime` | Boot timestamp, uptime duration |
 
+**CPU interval measurement:** The collector takes two `ps` samples separated by the sampling window. For each process present in both samples, interval CPU is calculated as:
+
+```text
+interval_cpu = (cputime_2 - cputime_1) / (timestamp_2 - timestamp_1) × 100%
+```
+
+This uses `cputime` deltas rather than the `%cpu` column, because BSD `ps %cpu` reports a process-lifetime average, not current usage. Processes that appear or disappear between samples are marked as `new` or `exited` rather than assigned an interval value.
+
+**Docker Desktop VM correlation:** The Docker collector additionally finds the Docker Desktop VM host process (matching `Virtualization.VirtualMachine` in the process list), records its RSS and CPU usage, and extracts Docker Desktop's VM resource reservation settings from `docker system info`. This enables the key diagnostic pattern: "VM reserves 8GB but containers only use 1.2GB."
+
 Each collector adapter:
 
 - Has a **timeout** (default 3s per source, 10s total collection budget)
 - Reports **completeness status** (`complete`, `partial`, `failed`) with error details
 - Produces a **typed, versioned** output object
 - Is **testable in isolation** via fixture files (pre-captured command output)
+
+**Collector status values:** `complete`, `partial`, `failed`, `skipped`, `denied`. The `denied` status is used when macOS permissions block access (e.g., `lsof` without Full Disk Access). The report explains what was unavailable and why for any non-`complete` status.
 
 If Docker is not running, the Docker collector reports `skipped` and the report notes "Docker not detected." If a permission error blocks `lsof`, the port collector reports `denied` and the report explains what was unavailable.
 
@@ -123,14 +145,19 @@ interface SystemSnapshot {
   machine: MachineInfo          // arch, cpu_cores, total_memory_gb, macos_version, uptime
   memory: MemoryStats           // free, active, inactive, compressed, wired, swap
   load: LoadStats               // 1/5/15 min averages, per-core usage over window
-  processes: ProcessInfo[]      // top 100 by resource usage, with lineage
+  processes: ProcessInfo[]      // full process list with lineage (see payload tiering below)
   ports: PortBinding[]          // listening TCP ports with owning PID
   docker: DockerState           // daemon status, containers with stats
   collector_status: CollectorStatus[]  // per-source completeness/errors
 }
 ```
 
-Only the top 100 processes are included (ranked by CPU × memory composite score) to bound LLM payload size. Process arguments are truncated to 200 characters. Paths are hashed, not sent raw.
+The full process list is retained locally for safety checks (child process validation, process group resolution). For the LLM payload, processes are grouped:
+
+- **Detail tier:** Top 50 processes by CPU × memory composite score, sent with full metadata
+- **Summary tier:** Remaining processes grouped by executable name, sent as aggregate entries (e.g., `node: 12 processes, total 2.1GB RSS, avg 3% CPU`)
+
+This satisfies two constraints: safety checks have complete lineage data, while the LLM payload stays bounded. Process arguments are truncated to 200 characters. Paths are hashed, not sent raw.
 
 ### Redaction Layer
 
@@ -144,6 +171,8 @@ Before sending to the LLM, the redactor transforms the snapshot:
 | Container names | Keep if generic (`redis`, `mysql`), hash if they contain project names or internal naming |
 | Port numbers | Keep (needed for diagnosis, not sensitive alone) |
 | File paths | Hash everything except basename (`~/worktrees/project-x/src/index.ts` → `…/project-x/src/index.ts`) |
+
+**Residual risk:** Regex-based redaction cannot catch all sensitive value formats. Known gaps include: database connection strings with embedded credentials, internal service names that match common words, and base64-encoded tokens. The `--preview-payload` flag exists so users can inspect the outbound payload before trusting the pipeline. The trace records every redaction rule applied.
 
 The redacted payload is written to the run trace. The user can preview it with `otter scan --preview-payload` before sending.
 
@@ -169,6 +198,7 @@ interface DiagnosticReport {
 interface Finding {
   id: string
   severity: "info" | "warning" | "critical"
+  evidence_level: "measured" | "supported_hypothesis" | "unsupported_inference"
   title: string                    // "Docker VM reserving 50% of RAM"
   explanation: string              // Plain language why this matters
   evidence_refs: string[]          // References to snapshot data points
@@ -177,12 +207,19 @@ interface Finding {
 interface Recommendation {
   id: string
   action_type: "stop_container" | "kill_process_group" | "quit_app"
-  target_ref: string               // Reference to snapshot entity
+  target_ref: EntityRef            // Typed reference to snapshot entity
   reason: string                   // Why this is safe and beneficial
   risk_level: "safe" | "caution" | "dangerous"
   expected_benefit: string         // "Frees ~8GB RAM, reduces swap pressure"
   blast_radius: string             // "Stops Docker VM; all containers will stop"
 }
+
+type EntityRef =
+  | { kind: "process"; entity_id: string; pid: number; pgid: number; start_time: string }
+  | { kind: "container"; entity_id: string; container_id: string }
+  | { kind: "app"; entity_id: string; app_name: string; pid: number }
+
+Entity IDs (`proc_<uuid>`, `container_<uuid>`, `app_<uuid>`) are assigned at snapshot build time and are stable within the run. The `EntityRef` contains both the UUID and immutable identity fields (PID + start time for processes, container ID for containers) so that revalidation can confirm the entity has not changed.
 ```
 
 The LLM **never generates shell commands**. Recommendations reference snapshot entities by ID. Local code resolves these references to actual PIDs or container IDs.
@@ -200,6 +237,27 @@ After the LLM returns recommendations, local code validates each one:
 
 The user sees each recommendation individually with its risk level, blast radius, and expected benefit. They approve or reject each one via `@clack/prompts` confirmations. Dangerous actions require typing the target name to confirm.
 
+**Risk-level execution policy:**
+
+| Risk Level | Confirmation Behavior |
+|-----------|----------------------|
+| `safe` | Per-action y/n prompt, then execute |
+| `caution` | Per-action y/n with expanded blast-radius display, then execute |
+| `dangerous` | Requires typing the exact target name (e.g., type `tunnel-service-mysql`), then execute |
+
+All three risk levels are executable. The escalating confirmation friction reflects the blast radius, not a hard block.
+
+**Safety classification thresholds:**
+
+| Classification | Definition |
+|---------------|-----------|
+| Idle container | `docker stats` CPU < 2% over sampling window + no health-check failure + restart policy is not `always` or `unless-stopped` |
+| Stale process | User-owned + listening port present + CPU < 1% + runtime > 8 hours + no controlling terminal (`TT` is `??`) |
+| Active child | Any process whose `ppid` matches the target's `pid` and is still alive at validation time |
+| Protected process | Owned by root or system users (`_windowserver`, `_mds`, etc.), OR managed by `launchd`, OR has active children |
+
+These thresholds are implemented in `validator/safety.ts` as deterministic checks. The LLM can suggest, but only these local rules decide.
+
 Execution uses fixed code paths, not LLM-generated commands:
 
 | Action | Implementation |
@@ -214,32 +272,54 @@ After execution, Otter collects a 3-second post-action sample to verify the expe
 
 ```bash
 otter scan                    # Full diagnostic: collect → analyze → report
+                              # Includes recommendations and interactive execution
 otter scan --json             # Machine-readable JSON report
 otter scan --preview-payload  # Show what would be sent to LLM, don't send
-otter scan --local-only       # Skip LLM, show raw local analysis only
+otter scan --local-only       # Skip LLM, show raw local metrics only (no diagnosis)
 otter scan --window 5         # Sampling window in seconds (default 3)
 
-otter clean                   # Alias for scan with recommendations enabled
-otter explain                 # Same as scan but skips recommendations
+otter explain                 # Diagnostic report without recommendations or execution
+otter clean                   # Same as scan; semantic alias focused on cleanup
+otter config set-api-key      # Store OpenAI API key in macOS Keychain
 
 otter trace list              # List recent diagnostic runs
 otter trace show <run-id>     # Show full trace for a run
-otter trace export <run-id>   # Export trace as shareable JSON
+otter trace export <run-id>   # Export trace as shareable JSON (redacted data only)
 ```
+
+**Command semantics:**
+
+- `scan`: Full pipeline including recommendations and interactive execution prompts.
+- `explain`: Diagnosis only. Skips recommendation generation. Useful when you just want to understand what's happening.
+- `clean`: Functionally identical to `scan`. Exists as a semantic alias for muscle memory and scripting.
 
 ### Run Trace Storage
 
-Traces are stored in `~/.otter/traces/` as JSONL files, one per run:
+Traces are stored in `~/.otter/traces/` as JSONL files, one per run. Traces store **redacted data only** — the pre-redaction snapshot exists in memory during the run but is never persisted to disk. The trace directory has `0700` permissions:
 
 ```text
 ~/.otter/
   traces/
     2026-10-30T14-22-01_scan.jsonl    # One run, one file
     2026-10-30T15-01-33_scan.jsonl
-  config.toml                           # API key, provider settings, preferences
+  settings.json                         # Preferences (no secrets stored here)
 ```
 
-Each trace contains: snapshot (pre-redaction reference), redacted payload, LLM request/response metadata, validated recommendations, user confirmations, execution results, post-action verification. Traces are local-only, never automatically uploaded. Auto-rotation keeps the last 100 runs.
+Each trace contains: redacted snapshot, LLM request/response metadata, validated recommendations, user confirmations, execution results, post-action verification. Traces are local-only, never automatically uploaded. Auto-rotation keeps the last 100 runs.
+
+`otter trace export` outputs the redacted trace. There is no flag to export pre-redaction data because it is never stored.
+
+### LLM Configuration
+
+**Provider:** OpenAI only in v1. The model is configurable in `settings.json` (default: `gpt-4o-mini`).
+
+**API key storage:** macOS Keychain via `security add-generic-password -s otter -a api-key`. Otter reads it at runtime with `security find-generic-password -s otter -a api-key -w`. The key is never written to disk in plaintext, never included in traces, and never sent anywhere except OpenAI's API.
+
+**First-run behavior:** If no API key is found, Otter prints setup instructions and exits with code `1`. The user runs `otter config set-api-key` to store the key.
+
+**No-key fallback:** `otter scan --local-only` works without an API key and outputs the raw metrics table.
+
+**Local-only mode definition:** `--local-only` outputs a formatted metrics table (top processes, memory, swap, Docker status, listening ports). It does not produce causal explanations, findings, or recommendations. It is a fast, private snapshot for users who want raw data or who haven't configured an LLM.
 
 ## Alternatives Considered
 
@@ -371,7 +451,10 @@ otter/
 | File | What Changes | Why |
 |------|-------------|-----|
 | `src/index.ts` | Create. Set up Commander program with `scan` and `trace` subcommands. Parse global options (`--json`, `--local-only`, `--preview-payload`, `--window`). Dispatch to command handlers. Exit with appropriate codes (0 = success, 1 = partial failure, 2 = fatal error). | Single entry point; routes CLI invocations to command logic. |
-| `src/cli/commands/scan.ts` | Create. Orchestrate full pipeline: collect → normalize → redact → analyze (or skip with `--local-only`) → validate → report → optionally confirm and execute. Manage timing budget across stages. Handle SIGINT gracefully (save partial trace). | Core diagnostic workflow; the only command most users interact with. |
+| `src/cli/commands/scan.ts` | Create. Orchestrate full pipeline: collect → normalize → redact → analyze (or skip with `--local-only`) → validate → report → optionally confirm and execute. Manage timing budget across stages. Handle SIGINT gracefully (save partial trace). | Core diagnostic workflow; the primary command most users interact with. |
+| `src/cli/commands/explain.ts` | Create. Same as scan but skips recommendation generation and execution prompts. Outputs findings only. | Supports diagnosis without cleanup suggestions. |
+| `src/cli/commands/clean.ts` | Create. Semantic alias for scan. Delegates to same pipeline. | Matches user mental model of cleanup. |
+| `src/cli/commands/config.ts` | Create. Subcommand `set-api-key` stores in macOS Keychain. Subcommand `show` displays settings (redacted). | Secure first-run setup. |
 | `src/cli/commands/trace.ts` | Create. Subcommands: `list` (show recent runs), `show <id>` (display full trace), `export <id>` (output as JSON). Read from trace store. | Debugging and audit trail access. |
 
 #### Collectors
@@ -380,7 +463,7 @@ otter/
 |------|-------------|-----|
 | `src/collectors/types.ts` | Create. Define `Collector<T>` interface: `name`, `timeout_ms`, `collect(): Promise<CollectorResult<T>>` where `CollectorResult` has `status: complete/partial/failed/skipped`, `data: T \| null`, `error: string \| null`, `duration_ms: number`. Define all data type interfaces: `ProcessInfo`, `MemoryStats`, `PortBinding`, `ContainerInfo`, `MachineInfo`, `LoadStats`. | Shared contract for all collectors; enables testing with fixtures. |
 | `src/collectors/system.ts` | Create. Collect machine info (arch, CPU cores, total RAM, macOS version) via `sysctl`. Collect uptime via `sysctl kern.boottime`. Collect load averages via `sysctl vm.loadavg`. | Baseline machine context needed for diagnosis. |
-| `src/collectors/process.ts` | Create. Run `ps -eo pid,ppid,user,%cpu,%mem,rss,etime,command` twice with `window` seconds between samples. Parse output into `ProcessInfo[]`. Compute CPU delta between samples for sustained vs. spike detection. Build process tree from `ppid` relationships. Rank by composite score (CPU × memory). Return top 100. | Primary diagnostic data; two samples distinguish sustained load. |
+| `src/collectors/process.ts` | Create. Run `ps -eo pid,ppid,pgid,user,%cpu,%mem,rss,vsz,lstart,etime,cputime,command` twice. Compute interval CPU from cputime deltas. Build full process tree. Return complete list for safety checks. | Primary diagnostic data; accurate interval CPU and full lineage. |
 | `src/collectors/memory.ts` | Create. Run `memory_pressure` for percentage, `vm_stat` for page-level detail, `sysctl vm.swapusage` for swap state. Parse into `MemoryStats` with free, active, inactive, compressed, wired, swap total/used. | Memory pressure is the most common Mac slowdown cause. |
 | `src/collectors/ports.ts` | Create. Run `lsof -iTCP -sTCP:LISTEN -n -P`. Parse into `PortBinding[]` with PID, port, protocol, process name. Handle permission-denied gracefully (report `partial`). | Identifies stale dev servers and service conflicts. |
 | `src/collectors/docker.ts` | Create. Check if Docker daemon is reachable via `docker info --format json`. If reachable, run `docker ps --format json` and `docker stats --no-stream --format json`. Map containers to host processes via Docker Desktop's VM process. If Docker unavailable, report `skipped`. | Docker is the single largest resource consumer in typical developer setups. |
@@ -460,9 +543,9 @@ otter/
 Build in this sequence, with each step producing a testable artifact:
 
 1. **Project scaffold**: `package.json`, `tsconfig.json`, `bunfig.toml`, `.gitignore`, `README.md`, `src/index.ts` with stub commands. Verify: `otter --help` works.
-2. **System + process collectors**: `collectors/types.ts`, `system.ts`, `process.ts`, `memory.ts`. Fixture tests for parsing. Verify: `otter scan --local-only --json` produces a snapshot.
+2. **System + process collectors**: `collectors/types.ts`, `system.ts`, `process.ts`, `memory.ts`. Fixture tests for parsing. Verify: `otter scan --local-only --json` produces raw collector output.
 3. **Ports + Docker collectors**: `ports.ts`, `docker.ts`, fixture tests. Verify: snapshot includes port and Docker data.
-4. **Snapshot schema + builder**: `snapshot/schema.ts`, `builder.ts`. Verify: full snapshot validates against Zod schema.
+4. **Snapshot schema + builder**: `snapshot/schema.ts`, `builder.ts`. Verify: full snapshot validates against Zod schema. (Note: step 2 outputs raw collector data; step 4 adds the validated combined snapshot.)
 5. **Redactor**: `redactor/rules.ts`, `redact.ts`, tests. Verify: `otter scan --preview-payload` shows redacted output.
 6. **LLM analyzer**: `analyzer/prompt.ts`, `llm.ts`, `response.ts`. Verify: `otter scan` produces a plain-language report.
 7. **Validator**: `validator/safety.ts`, `resolver.ts`, `revalidate.ts`, tests. Verify: recommendations with unsafe targets are rejected.
