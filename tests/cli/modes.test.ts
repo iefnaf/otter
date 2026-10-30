@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDiagnostic } from "../../src/cli/pipeline.ts";
@@ -55,6 +55,53 @@ describe("CLI local modes", () => {
     expect(help).toContain("scan");
     expect(help).not.toContain("--yes");
     expect(help).not.toContain("--trace-root");
+  });
+
+  test("the clean command exposes dry-run and verbose report modes", () => {
+    const result = Bun.spawnSync(["bun", "src/index.ts", "clean", "--help"], {
+      cwd: join(import.meta.dir, "../.."),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const help = result.stdout.toString();
+    expect(result.exitCode).toBe(0);
+    expect(help).toContain("--dry-run");
+    expect(help).toContain("--verbose");
+    expect(help).not.toContain("--yes");
+  });
+
+  test("protection commands persist user executable rules in a private config", async () => {
+    const home = await mkdtemp(join(tmpdir(), "otter-protect-home-"));
+    const env = { ...process.env, HOME: home };
+    const run = (args: string[]) => Bun.spawnSync(["bun", "src/index.ts", ...args], {
+      cwd: join(import.meta.dir, "../.."),
+      stdout: "pipe",
+      stderr: "pipe",
+      env,
+    });
+
+    expect(run(["protect", "add", "My Agent"]).stdout.toString()).toContain("Protected my agent.");
+    const list = run(["protect", "list"]).stdout.toString();
+    expect(list).toContain("clash");
+    expect(list).toContain("tailscale");
+    expect(list).toContain("my agent");
+    expect(run(["protect", "remove", "MY AGENT"]).stdout.toString())
+      .toContain("Removed protection for my agent.");
+
+    const settings = JSON.parse(await readFile(join(home, ".otter", "settings.json"), "utf8"));
+    expect(settings.protectedExecutables).toEqual([]);
+  });
+
+  test("history prints a human-readable table", async () => {
+    const home = await mkdtemp(join(tmpdir(), "otter-history-home-"));
+    const result = Bun.spawnSync(["bun", "src/index.ts", "history"], {
+      cwd: join(import.meta.dir, "../.."),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HOME: home },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("run                   command   result");
   });
 
   test("non-TTY output defaults to JSON", () => {

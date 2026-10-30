@@ -1,12 +1,18 @@
 #!/usr/bin/env bun
 import { Command, InvalidArgumentError } from "commander";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { runDiagnostic } from "./cli/pipeline.ts";
 import { localCommandRunner } from "./collectors/runner.ts";
 import { clearApiKey, getApiKey, setApiKey } from "./config/keychain.ts";
 import { readSettings, writeSettings } from "./config/settings.ts";
 import { readTraceStore } from "./trace/store.ts";
+import { readTraceHistory, renderHistory } from "./trace/history.ts";
+import {
+  builtInProtectionRules,
+  isBuiltInProtectionRule,
+  normalizeExecutableRule,
+} from "./validator/protection.ts";
 
 const otterRoot = join(homedir(), ".otter");
 
@@ -33,6 +39,7 @@ function addDiagnosticOptions(command: Command): Command {
     .option("--local-only", "stay local; this is the default in v0.1")
     .option("--preview-payload", "print the exact outbound-shaped redacted payload and exit")
     .option("--send-llm", "explicitly send the redacted payload to the configured analyzer")
+    .option("--verbose", "show every candidate in the terminal report")
     .option("--window <seconds>", "process sampling window", parseWindow, 3)
 }
 
@@ -43,6 +50,8 @@ async function executeDiagnostic(
     localOnly?: boolean;
     previewPayload?: boolean;
     sendLlm?: boolean;
+    dryRun?: boolean;
+    verbose?: boolean;
     window: number;
   },
 ): Promise<void> {
@@ -68,9 +77,73 @@ addDiagnosticOptions(program.command("explain").description("explain resource us
   .action(async (options) => executeDiagnostic("explain", options));
 
 addDiagnosticOptions(program.command("clean").description("review and execute locally validated candidates"))
+  .option("--dry-run", "collect and validate a plan without confirmation or execution")
   .action(async (options) => executeDiagnostic("clean", options));
 
 const config = program.command("config").description("manage local configuration");
+
+const protect = program.command("protect").description("manage persistent executable protection rules");
+
+protect.command("add <executable>")
+  .description("protect an executable from cleanup execution")
+  .action(async (executable: string) => {
+    const name = normalizeExecutableRule(basename(executable));
+    if (name === "") throw new InvalidArgumentError("executable was empty");
+    if (isBuiltInProtectionRule(name)) {
+      process.stdout.write(`${name} is already protected by a built-in rule.\n`);
+      return;
+    }
+    const settings = await readSettings(otterRoot);
+    if (settings.protectedExecutables.some((item) => normalizeExecutableRule(item) === name)) {
+      process.stdout.write(`${name} is already protected.\n`);
+      return;
+    }
+    await writeSettings(otterRoot, {
+      ...settings,
+      protectedExecutables: [
+        ...settings.protectedExecutables
+          .map(normalizeExecutableRule)
+          .filter((item) => item !== ""),
+        name,
+      ],
+    });
+    process.stdout.write(`Protected ${name}.\n`);
+  });
+
+protect.command("list")
+  .description("list built-in and user protection rules")
+  .action(async () => {
+    const settings = await readSettings(otterRoot);
+    const lines = [
+      "Built-in network-service rules",
+      ...builtInProtectionRules.map((rule) => `  ${rule.name}`),
+      "User rules",
+      ...settings.protectedExecutables.map((name) => `  ${name}`),
+    ];
+    process.stdout.write(`${lines.join("\n")}\n`);
+  });
+
+protect.command("remove <executable>")
+  .description("remove a user protection rule")
+  .action(async (executable: string) => {
+    const name = normalizeExecutableRule(basename(executable));
+    if (isBuiltInProtectionRule(name)) {
+      throw new InvalidArgumentError(`${name} is a built-in protection rule`);
+    }
+    const settings = await readSettings(otterRoot);
+    if (!settings.protectedExecutables.some((item) => normalizeExecutableRule(item) === name)) {
+      process.stdout.write(`No user rule protects ${name}.\n`);
+      return;
+    }
+    await writeSettings(otterRoot, {
+      ...settings,
+      protectedExecutables: settings.protectedExecutables
+        .map(normalizeExecutableRule)
+        .filter((item) => item !== "")
+        .filter((item) => item !== name),
+    });
+    process.stdout.write(`Removed protection for ${name}.\n`);
+  });
 
 config.command("show")
   .description("show non-secret settings")
@@ -122,6 +195,12 @@ config.command("clear-api-key")
   });
 
 const trace = program.command("trace").description("inspect local redacted traces");
+
+program.command("history")
+  .description("summarize prior local runs")
+  .action(async () => {
+    process.stdout.write(renderHistory(await readTraceHistory(await defaultTraceRoot())));
+  });
 
 trace.command("list")
   .description("list recent trace files")

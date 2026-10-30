@@ -17,7 +17,6 @@ import type {
 import { killProcess, stopContainer } from "../executor/actions.ts";
 import { verifyAction } from "../executor/verify.ts";
 import {
-  confirmationCandidate,
   createTerminalConfirmation,
   type ConfirmationAdapter,
 } from "./confirm.ts";
@@ -46,6 +45,8 @@ export interface DiagnosticOptions {
   readonly localOnly: boolean;
   readonly previewPayload: boolean;
   readonly sendLlm: boolean;
+  readonly dryRun?: boolean;
+  readonly verbose?: boolean;
   readonly windowSeconds: number;
   readonly traceRoot: string;
   readonly configRoot: string;
@@ -88,6 +89,14 @@ function executionDisposition(
   settings: Settings,
   options: DiagnosticOptions,
 ): ExecutionSummary {
+  if (options.dryRun === true) {
+    return {
+      enabled: false,
+      status: "not_available",
+      reason: "Dry-run mode collects and validates but never executes.",
+      results: [],
+    };
+  }
   if (command !== "clean") {
     return {
       enabled: settings.enableExecution,
@@ -150,9 +159,9 @@ async function executeConfirmedCandidates(
   const results: ExecutionResult[] = [];
   const verifications: ActionVerification[] = [];
   for (const candidate of validated) {
-    if (candidate.eligibility.status !== "eligible") continue;
+    if (candidate.decision !== "eligible" && candidate.decision !== "review_required") continue;
     const summary = summarizeValidatedCandidate(candidate);
-    const approved = await confirmation.confirm(confirmationCandidate(candidate));
+    const approved = await confirmation.confirm(summary);
     await appendTrace(trace, {
       eventType: "user_confirmed",
       payload: { candidateId: summary.candidateId, approved },
@@ -209,6 +218,9 @@ export async function runDiagnostic(options: DiagnosticOptions): Promise<Diagnos
   if (options.previewPayload && options.sendLlm) {
     throw new Error("--preview-payload stops before LLM transmission");
   }
+  if (options.dryRun && options.sendLlm) {
+    throw new Error("--dry-run does not send an analyzer request");
+  }
 
   const now = options.now ?? (() => new Date());
   const runId = makeRunId(now());
@@ -255,6 +267,7 @@ export async function runDiagnostic(options: DiagnosticOptions): Promise<Diagnos
       portsByPid.set(port.pid, ports);
     }
     const serviceManagerPids = await collectServicePids(runner);
+    const settings = await readSettings(options.configRoot);
     const validated = validateCandidates(
       redaction.candidateBook.records,
       snapshot.processes,
@@ -262,6 +275,7 @@ export async function runDiagnostic(options: DiagnosticOptions): Promise<Diagnos
       portsByPid,
       currentUser,
       serviceManagerPids,
+      settings.protectedExecutables,
     );
     const validatedSummaries = validated.map(summarizeValidatedCandidate);
     await appendTrace(trace, {
@@ -269,7 +283,6 @@ export async function runDiagnostic(options: DiagnosticOptions): Promise<Diagnos
       payload: { candidates: [...validatedSummaries] },
     });
 
-    const settings = await readSettings(options.configRoot);
     const executionPlan = executionDisposition(options.command, settings, options);
     let execution: ExecutionSummary = executionPlan;
 
@@ -296,7 +309,9 @@ export async function runDiagnostic(options: DiagnosticOptions): Promise<Diagnos
         ) || execution.results.some(
           (result) => result.status !== "succeeded" && result.status !== "skipped",
         ) ? 1 : 0,
-        stdout: options.json ? `${JSON.stringify(report, null, 2)}\n` : `${renderLocalReport(report)}\n`,
+        stdout: options.json
+          ? `${JSON.stringify(report, null, 2)}\n`
+          : `${renderLocalReport(report, options.verbose === true)}\n`,
         stderr: "",
         runId,
         traceRoot: options.traceRoot,
@@ -368,7 +383,7 @@ export async function runDiagnostic(options: DiagnosticOptions): Promise<Diagnos
       ) ? 0 : 1,
       stdout: options.json
         ? `${JSON.stringify(report, null, 2)}\n`
-        : `${renderLocalReport(report)}\n`,
+        : `${renderLocalReport(report, options.verbose === true)}\n`,
       stderr: "",
       runId,
       traceRoot: options.traceRoot,

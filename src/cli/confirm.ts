@@ -7,66 +7,72 @@ import {
   type ValidatedCandidateSummary,
 } from "../validator/safety.ts";
 
+export type ConfirmationCandidate = ValidatedCandidateSummary;
+
 export interface ConfirmationAdapter {
   confirm(candidate: ConfirmationCandidate): Promise<boolean>;
 }
 
-export type ConfirmationTarget =
-  | {
-    readonly kind: "process";
-    readonly executable: string;
-    readonly pid: number;
-    readonly user: string;
-    readonly elapsedHours: number;
-    readonly hasControllingTerminal: boolean;
-    readonly intervalCpuPercent: number | null;
-    readonly listeningPorts: readonly number[];
-  }
-  | {
-    readonly kind: "container";
-    readonly name: string;
-    readonly containerId: string;
-    readonly state: string;
-    readonly health: string;
-    readonly restartPolicy: string;
-    readonly intervalCpuPercent: number | null;
-    readonly memoryUsageMb: number;
-  };
-
-export interface ConfirmationCandidate extends ValidatedCandidateSummary {
-  readonly target: ConfirmationTarget;
+export function confirmationCandidate(
+  validated: ValidatedCandidate,
+): ConfirmationCandidate {
+  return summarizeValidatedCandidate(validated);
 }
 
-export function confirmationCandidate(validated: ValidatedCandidate): ConfirmationCandidate {
-  const summary = summarizeValidatedCandidate(validated);
-  if (validated.candidate.kind === "process") {
-    return {
-      ...summary,
-      target: {
-        kind: "process",
-        executable: validated.candidate.executable,
-        pid: validated.candidate.pid,
-        user: validated.candidate.user,
-        elapsedHours: validated.candidate.elapsedHours,
-        hasControllingTerminal: validated.candidate.hasControllingTerminal,
-        intervalCpuPercent: validated.candidate.intervalCpuPercent,
-        listeningPorts: [...validated.candidate.listeningPorts],
-      },
-    };
+function approvalAnswer(candidate: ConfirmationCandidate): string {
+  if (candidate.target.kind === "process" && candidate.target.listeningPorts.length === 0) {
+    return "y";
   }
-  return {
-    ...summary,
-    target: {
-      kind: "container",
-      name: validated.candidate.name,
-      containerId: validated.candidate.containerId,
-      state: validated.candidate.state,
-      health: validated.candidate.health,
-      restartPolicy: validated.candidate.restartPolicy,
-      intervalCpuPercent: validated.candidate.intervalCpuPercent,
-      memoryUsageMb: validated.candidate.memoryUsageMb,
-    },
-  };
+  return candidate.target.kind === "process"
+    ? `${candidate.target.executable} ${candidate.target.pid}`
+    : candidate.target.name;
+}
+
+function consequenceLines(candidate: ConfirmationCandidate): string[] {
+  return [
+    candidate.target.kind === "process"
+      ? `This stops ${candidate.target.executable}, PID ${candidate.target.pid}.`
+      : `This stops container ${candidate.target.name}.`,
+    candidate.impact,
+    candidate.observedBenefit,
+    "",
+    `Type ${approvalAnswer(candidate)} to ${candidate.actionType === "kill_process" ? "stop this process" : "stop this container"}: `,
+  ];
+}
+
+function detailLines(candidate: ConfirmationCandidate): string[] {
+  const target = candidate.target;
+  if (target.kind === "process") {
+    const cpu = target.intervalCpuPercent === null
+      ? "unknown"
+      : `${target.intervalCpuPercent.toFixed(2)}%`;
+    return [
+      `candidate ${candidate.candidateId}`,
+      `decision ${candidate.decision.replace(/_/g, " ")}`,
+      `target process ${target.executable}, PID ${target.pid}`,
+      `owner ${target.user}`,
+      `running for ${target.elapsedHours.toFixed(1)} hours`,
+      `CPU ${cpu}`,
+      `memory ${target.rssMb.toFixed(1)} MB RSS`,
+      `controlling terminal ${target.hasControllingTerminal ? "present" : "none"}`,
+      target.listeningPorts.length === 0
+        ? "listening ports none"
+        : `listening ${target.listeningPorts.length === 1 ? "port" : "ports"} ${target.listeningPorts.join(", ")}`,
+    ];
+  }
+  const cpu = target.intervalCpuPercent === null
+    ? "unknown"
+    : `${target.intervalCpuPercent.toFixed(2)}%`;
+  return [
+    `candidate ${candidate.candidateId}`,
+    `decision ${candidate.decision.replace(/_/g, " ")}`,
+    `target container ${target.name}, ID ${target.containerId.slice(0, 12)}`,
+    `state ${target.state}`,
+    `health ${target.health}`,
+    `restart policy ${target.restartPolicy}`,
+    `CPU ${cpu}`,
+    `memory ${target.memoryUsageMb.toFixed(1)} MB`,
+  ];
 }
 
 export function createTerminalConfirmation(
@@ -80,46 +86,21 @@ export function createTerminalConfirmation(
         const answer = await line.question(
           [
             "Otter cleanup candidate",
-            `candidate ${candidate.candidateId}`,
-            `action ${candidate.actionType}`,
-            `risk ${candidate.riskLevel}`,
-            ...targetLines(candidate.target),
-            `blast radius ${candidate.blastRadius}`,
-            `measured benefit ${candidate.observedBenefit}`,
-            "Approve this exact candidate? [y/N] ",
-          ].map(sanitizeTerminalText).join("\n"),
+            ...detailLines(candidate),
+            "",
+            ...consequenceLines(candidate),
+          ]
+            .map(sanitizeTerminalText)
+            .join("\n"),
         );
-        return answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes";
+        const expected = approvalAnswer(candidate);
+        const provided = answer.trim();
+        return expected === "y"
+          ? provided.toLowerCase() === "y" || provided.toLowerCase() === "yes"
+          : provided === expected;
       } finally {
         line.close();
       }
     },
   };
-}
-
-function targetLines(target: ConfirmationTarget): string[] {
-  if (target.kind === "process") {
-    const cpu = target.intervalCpuPercent === null
-      ? "unknown"
-      : `${target.intervalCpuPercent.toFixed(2)}%`;
-    return [
-      `target process ${target.executable}, PID ${target.pid}`,
-      `owner ${target.user}`,
-      `running for ${target.elapsedHours.toFixed(1)} hours`,
-      `CPU ${cpu}`,
-      `controlling terminal ${target.hasControllingTerminal ? "present" : "none"}`,
-      `listening ${target.listeningPorts.length === 1 ? "port" : "ports"} ${target.listeningPorts.join(", ")}`,
-    ];
-  }
-  const cpu = target.intervalCpuPercent === null
-    ? "unknown"
-    : `${target.intervalCpuPercent.toFixed(2)}%`;
-  return [
-    `target container ${target.name}, ID ${target.containerId.slice(0, 12)}`,
-    `state ${target.state}`,
-    `health ${target.health}`,
-    `restart policy ${target.restartPolicy}`,
-    `CPU ${cpu}`,
-    `memory ${target.memoryUsageMb.toFixed(1)} MB`,
-  ];
 }

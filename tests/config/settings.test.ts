@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { analyzerBaseUrl, readSettings } from "../../src/config/settings.ts";
+import { analyzerBaseUrl, readSettings, writeSettings } from "../../src/config/settings.ts";
 import { resolveApiKey } from "../../src/config/keychain.ts";
 import { output } from "../helpers.ts";
 
@@ -12,9 +12,20 @@ describe("analyzer configuration", () => {
     expect(await readSettings(root)).toEqual({
       model: "gpt-4o-mini",
       enableExecution: false,
+      protectedExecutables: [],
     });
     expect(analyzerBaseUrl("deepseek-v4-flash")).toBe("https://api.deepseek.com");
     expect(analyzerBaseUrl("gpt-4o-mini")).toBe("https://api.openai.com/v1");
+  });
+
+  test("persists user protection rules", async () => {
+    const root = await mkdtemp(join(tmpdir(), "otter-protection-settings-"));
+    await writeSettings(root, {
+      model: "gpt-4o-mini",
+      enableExecution: false,
+      protectedExecutables: ["My Agent"],
+    });
+    expect((await readSettings(root)).protectedExecutables).toEqual(["My Agent"]);
   });
 
   test("uses the provider-specific environment key before Keychain", async () => {

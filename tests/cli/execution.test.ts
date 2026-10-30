@@ -21,7 +21,7 @@ async function executionTestRoot(): Promise<{ traceRoot: string; configRoot: str
 describe("guarded clean execution", () => {
   test("local-only, JSON, scan, and denial never execute", async () => {
     const roots = await executionTestRoot();
-    await writeSettings(roots.configRoot, { model: "gpt-4o-mini", enableExecution: true });
+    await writeSettings(roots.configRoot, { model: "gpt-4o-mini", enableExecution: true, protectedExecutables: [] });
     const runner = await createFixtureRunner();
     const calls: string[] = [];
     const confirmation = {
@@ -84,7 +84,7 @@ describe("guarded clean execution", () => {
 
   test("a denied candidate is audited and never sent to the executor", async () => {
     const roots = await executionTestRoot();
-    await writeSettings(roots.configRoot, { model: "gpt-4o-mini", enableExecution: true });
+    await writeSettings(roots.configRoot, { model: "gpt-4o-mini", enableExecution: true, protectedExecutables: [] });
     const result = await runDiagnostic({
       command: "clean",
       json: false,
@@ -106,12 +106,12 @@ describe("guarded clean execution", () => {
     const report = localReportSchema.parse(completed?.payload.report);
     expect(report.execution.results).toEqual([]);
     expect(events.some((event) => event.eventType === "action_executed")).toBe(false);
-    expect(JSON.stringify(events).includes("project-cache")).toBe(false);
+    expect(JSON.stringify(events).includes("--token")).toBe(false);
   });
 
   test("an approved disposable container is stopped, verified, and audited", async () => {
     const roots = await executionTestRoot();
-    await writeSettings(roots.configRoot, { model: "gpt-4o-mini", enableExecution: true });
+    await writeSettings(roots.configRoot, { model: "gpt-4o-mini", enableExecution: true, protectedExecutables: [] });
     const baseRunner = await createFixtureRunner();
     const runningInspection = await fixture("docker-inspect.json");
     const exitedInspection = runningInspection.replace('"running"', '"exited"');
@@ -161,12 +161,12 @@ describe("guarded clean execution", () => {
     expect(report.execution.verifications?.[0]?.status).toBe("verified");
     expect(events.filter((event) => event.eventType === "action_executed")).toHaveLength(1);
     expect(events.filter((event) => event.eventType === "action_verified")).toHaveLength(1);
-    expect(result.stdout.includes("project-cache")).toBe(false);
+    expect(result.stdout).toContain("project-cache");
   });
 
   test("execution stops when the confirmation audit write fails", async () => {
     const roots = await executionTestRoot();
-    await writeSettings(roots.configRoot, { model: "gpt-4o-mini", enableExecution: true });
+    await writeSettings(roots.configRoot, { model: "gpt-4o-mini", enableExecution: true, protectedExecutables: [] });
     let stopSeen = false;
     const runner: CommandRunner = async (command, args, options: CommandRunOptions) => {
       if (command === "docker" && args[0] === "stop") {

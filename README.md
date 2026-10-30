@@ -13,6 +13,17 @@ Execution is disabled by default. Only `clean` can execute, and only when all of
 - Otter can write its confirmation to the local audit trace.
 
 `scan`, `explain`, `--local-only`, and `--json` never execute. There is no consent-skipping flag.
+`clean --dry-run` also runs the complete collection and validation pipeline, writes the full candidate list to a private trace, prints a compact plan, and writes no confirmation or execution events.
+
+Common network-service executables, including Clash, Clash Verge, Surge, v2ray, Shadowrocket, and Tailscale, are protected by built-in rules. A protected executable is never eligible for an execution prompt. Add, inspect, and remove user rules by executable name:
+
+```bash
+bun run dev protect add my-agent
+bun run dev protect list
+bun run dev protect remove my-agent
+```
+
+Built-in network-service rules cannot be removed. A listening process requires an exact executable-and-PID answer before it can be stopped.
 
 The analyzer is deny-by-default. Without `--send-llm`, Otter makes no network request. With `--send-llm`, Otter sends only the projected payload shown by `--preview-payload`. Model output may contain findings and opinions about locally generated candidate IDs. It cannot contain recommendations, commands, target references, risk levels, or expected savings.
 
@@ -30,7 +41,9 @@ bun run dev --help
 bun run dev scan --local-only
 bun run dev scan --preview-payload
 bun run dev scan --send-llm
+bun run dev clean --dry-run
 bun run dev clean
+bun run dev scan --verbose
 ```
 
 Enable cleanup execution:
@@ -51,6 +64,7 @@ Inspect local traces:
 bun run dev trace list
 bun run dev trace show <run-id>
 bun run dev trace export <run-id>
+bun run dev history
 ```
 
 ## Verify
