@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openTraceStore, readTraceStore } from "../../src/trace/store.ts";
@@ -58,5 +58,21 @@ describe("trace store", () => {
     expect(files).toHaveLength(100);
     expect(files.some((file) => file.runId === "19700101T000000-000000")).toBe(false);
     expect(files[0]?.runId).toBe("20261030T000000-abcdef");
+  });
+
+  test("rotation ignores unrelated JSONL and requires an owned root for reads", async () => {
+    const root = await mkdtemp(join(tmpdir(), "otter-rotate-safety-"));
+    await writeFile(join(root, "customer-data.jsonl"), "keep me\n");
+    const store = await openTraceStore(root, "20261030T000000-abcdef", "scan", 0);
+    await store.append({
+      eventType: "run_failed",
+      payload: { message: "test unrelated rotation" },
+    });
+    expect(await readFile(join(root, "customer-data.jsonl"), "utf8")).toBe("keep me\n");
+
+    await writeFile(join(root, ".otter-traces"), "not otter\n");
+    await expect(store.show("20261030T000000-abcdef")).rejects.toThrow(
+      "directory is not an Otter trace root",
+    );
   });
 });

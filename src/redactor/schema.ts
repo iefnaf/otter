@@ -5,6 +5,7 @@ import {
   machineSchema,
   memorySchema,
 } from "../snapshot/schema.ts";
+import type { CandidateBook } from "../candidates/types.ts";
 
 export const redactedProcessSchema = z.object({
   entityId: z.string().min(1),
@@ -121,4 +122,5 @@ export interface TransformationCounts {
 export interface RedactionResult {
   readonly payload: RedactedPayload;
   readonly transformations: TransformationCounts;
+  readonly candidateBook: CandidateBook;
 }

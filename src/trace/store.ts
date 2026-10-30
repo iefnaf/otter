@@ -13,6 +13,7 @@ import { traceEventSchema, type TraceEvent, type TraceEventDraft } from "./schem
 
 const runIdPattern = /^\d{8}T\d{6}-[0-9a-f]{6}$/;
 const maximumTraces = 100;
+const markerName = ".otter-traces";
 
 export interface TraceFile {
   readonly runId: string;
@@ -55,6 +56,7 @@ function makeEvent(
 
 async function readEvents(root: string, runId: string): Promise<TraceEvent[]> {
   assertRunId(runId);
+  await assertOwnedRoot(root);
   const content = await readFile(join(root, `${runId}.jsonl`), "utf8");
   return content
     .split("\n")
@@ -67,6 +69,7 @@ async function rotate(root: string): Promise<void> {
   const files: { name: string; updatedAtMs: number }[] = [];
   for (const entry of entries) {
     if (!entry.endsWith(".jsonl")) continue;
+    if (!runIdPattern.test(entry.replace(/\.jsonl$/, ""))) continue;
     const info = await stat(join(root, entry));
     if (info.isFile()) files.push({ name: entry, updatedAtMs: info.mtimeMs });
   }
@@ -74,6 +77,14 @@ async function rotate(root: string): Promise<void> {
   for (const file of files.slice(maximumTraces)) {
     await unlink(join(root, file.name));
   }
+}
+
+async function assertOwnedRoot(root: string): Promise<void> {
+  const marker = await readFile(join(root, markerName), "utf8").then(
+    (content) => content.trim(),
+    () => null,
+  );
+  if (marker !== "owned by otter") throw new Error("directory is not an Otter trace root");
 }
 
 export async function openTraceStore(
@@ -84,6 +95,13 @@ export async function openTraceStore(
 ): Promise<TraceStore> {
   assertRunId(runId);
   await mkdir(root, { recursive: true });
+  const markerPath = join(root, markerName);
+  const marker = await readFile(markerPath, "utf8").then(
+    (content) => content.trim(),
+    () => null,
+  );
+  if (marker === null) await writeFile(markerPath, "owned by otter\n", { mode: 0o600 });
+  else if (marker !== "owned by otter") throw new Error("directory is not an Otter trace root");
   await setPrivateMode(root, true);
   const path = join(root, `${runId}.jsonl`);
   const existing = await stat(path).then(
@@ -115,10 +133,10 @@ export async function openTraceStore(
       const files: TraceFile[] = [];
       for (const entry of entries) {
         if (!entry.endsWith(".jsonl")) continue;
+        if (!runIdPattern.test(entry.replace(/\.jsonl$/, ""))) continue;
         const info = await stat(join(root, entry));
         if (!info.isFile()) continue;
         const runIdFromName = entry.replace(/\.jsonl$/, "");
-        assertRunId(runIdFromName);
         files.push({
           runId: runIdFromName,
           sizeBytes: info.size,
@@ -145,10 +163,10 @@ export function readTraceStore(root: string): Omit<TraceStore, "append"> {
       const files: TraceFile[] = [];
       for (const entry of entries) {
         if (!entry.endsWith(".jsonl")) continue;
+        if (!runIdPattern.test(entry.replace(/\.jsonl$/, ""))) continue;
         const info = await stat(join(root, entry));
         if (!info.isFile()) continue;
         const runIdFromName = entry.replace(/\.jsonl$/, "");
-        assertRunId(runIdFromName);
         files.push({
           runId: runIdFromName,
           sizeBytes: info.size,

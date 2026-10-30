@@ -46,9 +46,15 @@ describe("macOS command parsers", () => {
       '{"ID":"abcdef0123456789","Names":"project-cache","Image":"redis:7","State":"running","Labels":{"otter.disposable":"true"}}\n',
     );
     expect(containers[0]?.labels["otter.disposable"]).toBe("true");
+    const cliLabels = parseDockerContainers(
+      '{"ID":"abcdef0123456789","Names":"project-cache","Image":"redis:7","State":"running","Labels":"otter.disposable=true,other=yes"}\n',
+    );
+    expect(cliLabels[0]?.labels).toEqual({ "otter.disposable": "true", other: "yes" });
     const inspection = parseDockerInspection(await fixture("docker-inspect.json"));
     expect(inspection).toEqual({
+      id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
       name: "project-cache",
+      startedAt: "2026-10-01T00:00:00.000Z",
       image: "redis:7",
       state: "running",
       health: "healthy",

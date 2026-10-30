@@ -9,6 +9,7 @@ export const localCommandRunner: CommandRunner = async (
     stdin: options.stdin === undefined ? "ignore" : "pipe",
     stdout: "pipe",
     stderr: "pipe",
+    env: { ...process.env, LC_ALL: "C", LANG: "C" },
   });
 
   if (options.stdin !== undefined && child.stdin) {

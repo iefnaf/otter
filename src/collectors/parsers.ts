@@ -269,7 +269,7 @@ const dockerPsRecordSchema = z.object({
   Names: z.string().min(1),
   Image: z.string().min(1),
   State: z.enum(["running", "paused", "exited", "restarting"]),
-  Labels: z.record(z.string()).default({}),
+  Labels: z.union([z.record(z.string()), z.string()]).default(""),
 });
 
 export function parseDockerContainers(output: string): readonly DockerContainerRecord[] {
@@ -283,16 +283,23 @@ export function parseDockerContainers(output: string): readonly DockerContainerR
         name: parsed.Names,
         image: parsed.Image,
         state: parsed.State,
-        labels: parsed.Labels,
+        labels: typeof parsed.Labels === "string"
+          ? Object.fromEntries(parsed.Labels.split(",").filter((item) => item !== "").map((item) => {
+            const separator = item.indexOf("=");
+            return separator === -1 ? [item, ""] : [item.slice(0, separator), item.slice(separator + 1)];
+          }))
+          : parsed.Labels,
       };
     });
 }
 
 const dockerInspectSchema = z.object({
+  Id: z.string().min(1),
   Name: z.string().min(1),
   Config: z.object({ Image: z.string().min(1), Labels: z.record(z.string()) }),
   State: z.object({
     Status: z.enum(["running", "paused", "exited", "restarting"]),
+    StartedAt: z.string().min(1),
     Health: z
       .object({ Status: z.enum(["healthy", "unhealthy", "starting"]) })
       .nullable()
@@ -304,7 +311,9 @@ const dockerInspectSchema = z.object({
 });
 
 export interface DockerInspection {
+  readonly id: string;
   readonly name: string;
+  readonly startedAt: string;
   readonly image: string;
   readonly state: "running" | "paused" | "exited" | "restarting";
   readonly health: "healthy" | "unhealthy" | "starting" | "none";
@@ -316,6 +325,8 @@ export function parseDockerInspection(output: string): DockerInspection {
   const parsed = dockerInspectSchema.parse(JSON.parse(output));
   return {
     name: parsed.Name.replace(/^\//, ""),
+    id: parsed.Id,
+    startedAt: parsed.State.StartedAt,
     image: parsed.Config.Image,
     state: parsed.State.Status,
     health: parsed.State.Health?.Status ?? "none",

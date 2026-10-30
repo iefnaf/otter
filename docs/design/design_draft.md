@@ -2,7 +2,11 @@
 
 * **Author:** fanfei
 * **Date:** 2026-10-30
-* **Status:** Draft
+* **Status:** Draft, partially superseded by the implementation
+
+## Implementation Note
+
+Otter now generates cleanup candidates locally. The analyzer returns findings and opinions about those opaque candidates; it cannot return actions, targets, risks, commands, or expected savings. This draft retains the earlier design process, including its recommendation-oriented flow. For the behavior that ships with the code, read the status section in [../README.md](../README.md).
 
 ## The Problem
 

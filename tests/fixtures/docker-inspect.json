@@ -1,1 +1,1 @@
-{"Name":"/project-cache","Config":{"Image":"redis:7","Labels":{"otter.disposable":"true"}},"State":{"Status":"running","Health":{"Status":"healthy"}},"HostConfig":{"RestartPolicy":{"Name":"no"}}}
+{"Id":"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","Name":"/project-cache","Config":{"Image":"redis:7","Labels":{"otter.disposable":"true"}},"State":{"Status":"running","StartedAt":"2026-10-01T00:00:00.000Z","Health":{"Status":"healthy"}},"HostConfig":{"RestartPolicy":{"Name":"no"}}}

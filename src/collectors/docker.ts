@@ -49,7 +49,7 @@ export function createDockerCollector(
       }
 
       const info = parseDockerInfo(infoOutput.stdout);
-      const psOutput = await runner("docker", ["ps", "--format", "json"], { timeoutMs });
+      const psOutput = await runner("docker", ["ps", "--no-trunc", "--format", "json"], { timeoutMs });
       if (psOutput.exitCode !== 0) throw new Error("docker ps failed");
       const records = parseDockerContainers(psOutput.stdout);
       const firstStatsOutput = await runner(
@@ -79,17 +79,19 @@ export function createDockerCollector(
       const containers: ContainerInfo[] = inspections.map(({ record, inspection }) => {
         const first = firstStats.find((sample) => record.id.startsWith(sample.id));
         const second = secondStats.find((sample) => record.id.startsWith(sample.id));
+        const firstCpu = first?.cpuPercent ?? null;
+        const secondCpu = second?.cpuPercent ?? null;
         return {
           id: record.id,
+          startedAt: inspection.startedAt,
           name: inspection.name,
           image: inspection.image,
           state: inspection.state,
           health: inspection.health,
           restartPolicy: inspection.restartPolicy,
-          intervalCpuPercent:
-            second?.cpuPercent !== undefined && second.cpuPercent !== null
-              ? second.cpuPercent
-              : first?.cpuPercent ?? null,
+          intervalCpuPercent: firstCpu !== null && secondCpu !== null
+            ? (firstCpu + secondCpu) / 2
+            : null,
           memoryUsageMb: second?.memoryUsageMb ?? first?.memoryUsageMb ?? 0,
           entityId: `container_${randomUUID()}`,
           labels: inspection.labels,

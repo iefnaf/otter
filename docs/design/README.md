@@ -1,6 +1,6 @@
 # Otter design history
 
-This directory contains the current design and the review history that shaped it.
+This directory contains the design draft and the review history that shaped it. The shipped safety contract is documented in the repository [README](../README.md).
 
 ## Current design
 

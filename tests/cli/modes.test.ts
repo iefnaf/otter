@@ -54,6 +54,17 @@ describe("CLI local modes", () => {
     const help = result.stdout.toString();
     expect(help).toContain("scan");
     expect(help).not.toContain("--yes");
+    expect(help).not.toContain("--trace-root");
+  });
+
+  test("non-TTY output defaults to JSON", () => {
+    const result = Bun.spawnSync(["bun", "src/index.ts", "scan", "--local-only", "--window", "0"], {
+      cwd: join(import.meta.dir, "../.."),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(0);
+    expect(() => localReportSchema.parse(JSON.parse(result.stdout.toString()))).not.toThrow();
   });
 
   test("terminal rendering removes model and process control characters", () => {

@@ -16,6 +16,20 @@ export async function createFixtureRunner(): Promise<CommandRunner> {
   const vmStat = await fixture("vm-stat.txt");
   const swap = await fixture("swapusage.txt");
   const lsof = await fixture("lsof.txt");
+  const dockerInfo = JSON.stringify({
+    ServerVersion: "27.0.0",
+    NCPU: 4,
+    MemTotal: 8 * 1024 * 1024 * 1024,
+  });
+  const dockerPs = JSON.stringify({
+    ID: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    Names: "project-cache",
+    Image: "redis:7",
+    State: "running",
+    Labels: { "otter.disposable": "true" },
+  });
+  const dockerInspect = await fixture("docker-inspect.json");
+  const dockerStats = await fixture("docker-stats.txt");
   const runner: CommandRunner = async (_command, args) => {
     const key = args.join(" ");
     if (key === "-n hw.machine") return output("arm64");
@@ -30,7 +44,11 @@ export async function createFixtureRunner(): Promise<CommandRunner> {
     if (key === "") return output(vmStat);
     if (key === "-n vm.swapusage") return output(swap);
     if (key === "-iTCP -sTCP:LISTEN -n -P") return output(lsof);
-    if (key === "info --format {{json .}}") return output("", 1);
+    if (key === "list") return output("PID Status Label\n0 0 com.apple.session\n");
+    if (key === "info --format {{json .}}") return output(dockerInfo);
+    if (key === "ps --no-trunc --format json") return output(dockerPs);
+    if (key.startsWith("inspect --format")) return output(dockerInspect);
+    if (key === "stats --no-stream --format json") return output(dockerStats);
     return output("", 1);
   };
   return runner;
@@ -87,7 +105,8 @@ export function snapshotFixture(): SystemSnapshot {
       daemonVersion: "27.0.0",
       vmProcess: null,
       containers: [{
-        id: "abcdef0123456789",
+        id: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        startedAt: "2026-10-01T00:00:00.000Z",
         name: "project-cache",
         image: "redis:7",
         state: "running",

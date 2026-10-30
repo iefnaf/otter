@@ -3,6 +3,8 @@ import { analyzerResponseSchema } from "../analyzer/response.ts";
 import { localReportSchema } from "../reporter/local.ts";
 import { redactedPayloadSchema } from "../redactor/schema.ts";
 import { collectorStatusSchema } from "../snapshot/schema.ts";
+import { actionVerificationSchema, executionResultSchema } from "../executor/types.ts";
+import { validatedCandidateSummarySchema } from "../validator/schema.ts";
 
 export const traceEventSchema = z.discriminatedUnion("eventType", [
   z.object({
@@ -52,6 +54,39 @@ export const traceEventSchema = z.discriminatedUnion("eventType", [
       report: analyzerResponseSchema.nullable(),
       errors: z.array(z.string()),
     }),
+  }),
+  z.object({
+    runId: z.string().min(1),
+    seq: z.number().int().nonnegative(),
+    timestamp: z.string().min(1),
+    eventType: z.literal("recommendations_validated"),
+    payload: z.object({
+      candidates: z.array(validatedCandidateSummarySchema),
+    }),
+  }),
+  z.object({
+    runId: z.string().min(1),
+    seq: z.number().int().nonnegative(),
+    timestamp: z.string().min(1),
+    eventType: z.literal("user_confirmed"),
+    payload: z.object({
+      candidateId: z.string().regex(/^cand_[0-9a-f]{12}$/),
+      approved: z.boolean(),
+    }),
+  }),
+  z.object({
+    runId: z.string().min(1),
+    seq: z.number().int().nonnegative(),
+    timestamp: z.string().min(1),
+    eventType: z.literal("action_executed"),
+    payload: executionResultSchema,
+  }),
+  z.object({
+    runId: z.string().min(1),
+    seq: z.number().int().nonnegative(),
+    timestamp: z.string().min(1),
+    eventType: z.literal("action_verified"),
+    payload: actionVerificationSchema,
   }),
   z.object({
     runId: z.string().min(1),

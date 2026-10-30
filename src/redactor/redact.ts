@@ -6,7 +6,6 @@ import type {
   SystemSnapshot,
 } from "../snapshot/schema.ts";
 import type {
-  CandidateFact,
   ProcessSummary,
   RedactedContainer,
   RedactedPort,
@@ -15,6 +14,7 @@ import type {
   RedactionResult,
 } from "./schema.ts";
 import { parseElapsedSeconds } from "../collectors/parsers.ts";
+import { buildCandidateBook } from "../candidates/build.ts";
 
 const genericNames = new Set([
   "redis",
@@ -123,18 +123,6 @@ function topProcesses(processes: readonly ProcessInfo[]): readonly ProcessInfo[]
   return [...new Map([...byCpu, ...byMemory].map((process) => [process.entityId, process])).values()];
 }
 
-function candidateProcesses(
-  processes: readonly ProcessInfo[],
-  ports: ReadonlySet<number>,
-  currentUser: string,
-): readonly ProcessInfo[] {
-  return processes
-    .filter((process) => process.user === currentUser)
-    .filter((process) => ports.has(process.pid) || process.controllingTerminal === "??")
-    .sort((left, right) => right.rssMb - left.rssMb)
-    .slice(0, 50);
-}
-
 function redactContainer(
   container: ContainerInfo,
   runId: string,
@@ -155,63 +143,22 @@ function redactContainer(
   };
 }
 
-function candidateId(kind: string, localId: string, runId: string): string {
-  return `cand_${hash(kind + ":" + localId, runId).slice(0, 12)}`;
-}
-
-function buildCandidateBook(
-  snapshot: SystemSnapshot,
-  currentUser: string,
-  runId: string,
-): readonly CandidateFact[] {
-  const listeningByPid = new Map<number, number[]>();
-  for (const port of snapshot.ports) {
-    const existing = listeningByPid.get(port.pid) ?? [];
-    existing.push(port.port);
-    listeningByPid.set(port.pid, existing);
-  }
-  const processCandidates = snapshot.processes
-    .filter((process) => process.user === currentUser)
-    .filter((process) => listeningByPid.has(process.pid))
-    .slice(0, 20)
-    .map((process): CandidateFact => ({
-      candidateId: candidateId("process", process.entityId, runId),
-      kind: "process",
-      executable: executableName(process.command),
-      intervalCpuPercent: process.intervalCpuPercent,
-      rssMb: process.rssMb,
-      elapsedHours: parseElapsedSeconds(process.elapsed) / 3600,
-      hasControllingTerminal: process.controllingTerminal !== "??",
-      listeningPorts: listeningByPid.get(process.pid) ?? [],
-    }));
-  const containerCandidates = snapshot.docker.containers
-    .filter((container) => container.labels["otter.disposable"] === "true")
-    .slice(0, 20)
-    .map((container): CandidateFact => ({
-      candidateId: candidateId("container", container.entityId, runId),
-      kind: "container",
-      state: container.state,
-      health: container.health,
-      restartPolicy: container.restartPolicy,
-      intervalCpuPercent: container.intervalCpuPercent,
-      memoryUsageMb: container.memoryUsageMb,
-      disposable: true,
-    }));
-  return [...processCandidates, ...containerCandidates].slice(0, 25);
-}
-
 export function redactSnapshot(
   snapshot: SystemSnapshot,
   options: RedactionOptions,
 ): RedactionResult {
   const counter = new RedactionCounter();
+  const candidateBook = buildCandidateBook(snapshot, options.currentUser, options.runId);
+  const candidateEntityIds = new Set(
+    candidateBook.records
+      .filter((candidate) => candidate.kind === "process")
+      .map((candidate) => candidate.entityId),
+  );
   const detail = topProcesses(snapshot.processes);
   const detailIds = new Set(detail.map((process) => process.entityId));
-  const candidates = candidateProcesses(
-    snapshot.processes,
-    new Set(snapshot.ports.map((port) => port.pid)),
-    options.currentUser,
-  );
+  const candidates = snapshot.processes
+    .filter((process) => candidateEntityIds.has(process.entityId))
+    .sort((left, right) => right.rssMb - left.rssMb);
   const representedIds = new Set([
     ...detailIds,
     ...candidates.map((process) => process.entityId),
@@ -253,7 +200,7 @@ export function redactSnapshot(
       candidates: candidates.map(redactProcess),
       summary: [...summarize(summarySource)],
     },
-    candidateBook: [...buildCandidateBook(snapshot, options.currentUser, options.runId)],
+    candidateBook: [...candidateBook.facts],
   };
-  return { payload, transformations: counter.result() };
+  return { payload, transformations: counter.result(), candidateBook };
 }

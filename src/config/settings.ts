@@ -3,9 +3,8 @@ import { join } from "node:path";
 import { z } from "zod";
 
 export const settingsSchema = z.strictObject({
-  model: z.string().min(1).default("gpt-4o-mini"),
-  apiBase: z.string().url().default("https://api.openai.com/v1"),
-  enableExecution: z.literal(false).default(false),
+  model: z.enum(["gpt-4o-mini", "deepseek-v4-flash"]).default("gpt-4o-mini"),
+  enableExecution: z.boolean().default(false),
 });
 
 export type Settings = z.infer<typeof settingsSchema>;
@@ -40,4 +39,10 @@ export async function writeSettings(
   await rename(temporary, destination);
   await chmod(destination, 0o600);
   return parsed;
+}
+
+export function analyzerBaseUrl(model: Settings["model"]): string {
+  return model === "deepseek-v4-flash"
+    ? "https://api.deepseek.com"
+    : "https://api.openai.com/v1";
 }

@@ -1,12 +1,11 @@
 #!/usr/bin/env bun
 import { Command, InvalidArgumentError } from "commander";
-import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { runDiagnostic } from "./cli/pipeline.ts";
 import { localCommandRunner } from "./collectors/runner.ts";
 import { clearApiKey, getApiKey, setApiKey } from "./config/keychain.ts";
-import { readSettings } from "./config/settings.ts";
+import { readSettings, writeSettings } from "./config/settings.ts";
 import { readTraceStore } from "./trace/store.ts";
 
 const otterRoot = join(homedir(), ".otter");
@@ -20,15 +19,13 @@ function parseWindow(value: string): number {
 }
 
 async function defaultTraceRoot(): Promise<string> {
-  const root = join(otterRoot, "traces");
-  await mkdir(root, { recursive: true });
-  return root;
+  return join(otterRoot, "traces");
 }
 
 const program = new Command()
   .name("otter")
   .version("0.1.0")
-  .description("Read-only macOS resource diagnostics");
+  .description("macOS resource diagnostics with guarded cleanup");
 
 function addDiagnosticOptions(command: Command): Command {
   return command
@@ -37,7 +34,6 @@ function addDiagnosticOptions(command: Command): Command {
     .option("--preview-payload", "print the exact outbound-shaped redacted payload and exit")
     .option("--send-llm", "explicitly send the redacted payload to the configured analyzer")
     .option("--window <seconds>", "process sampling window", parseWindow, 3)
-    .option("--trace-root <path>", "trace directory, primarily for tests");
 }
 
 async function executeDiagnostic(
@@ -48,17 +44,16 @@ async function executeDiagnostic(
     previewPayload?: boolean;
     sendLlm?: boolean;
     window: number;
-    traceRoot?: string;
   },
 ): Promise<void> {
   const result = await runDiagnostic({
     command,
-    json: options.json === true,
+    json: options.json === true || process.stdout.isTTY !== true,
     localOnly: options.localOnly === true,
     previewPayload: options.previewPayload === true,
     sendLlm: options.sendLlm === true,
     windowSeconds: options.window,
-    traceRoot: options.traceRoot ?? (await defaultTraceRoot()),
+    traceRoot: await defaultTraceRoot(),
     configRoot: otterRoot,
   });
   process.stdout.write(result.stdout);
@@ -72,7 +67,7 @@ addDiagnosticOptions(program.command("scan").description("collect a local snapsh
 addDiagnosticOptions(program.command("explain").description("explain resource usage without execution"))
   .action(async (options) => executeDiagnostic("explain", options));
 
-addDiagnosticOptions(program.command("clean").description("show candidates; execution is disabled"))
+addDiagnosticOptions(program.command("clean").description("review and execute locally validated candidates"))
   .action(async (options) => executeDiagnostic("clean", options));
 
 const config = program.command("config").description("manage local configuration");
@@ -82,7 +77,29 @@ config.command("show")
   .action(async () => {
     const settings = await readSettings(otterRoot);
     const apiKeyConfigured = await getApiKey(localCommandRunner) !== null;
-    process.stdout.write(`${JSON.stringify({ ...settings, apiKeyConfigured }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ ...settings, keychainConfigured: apiKeyConfigured }, null, 2)}\n`);
+  });
+
+config.command("set-model <model>")
+  .description("set gpt-4o-mini or deepseek-v4-flash")
+  .action(async (model: string) => {
+    if (model !== "gpt-4o-mini" && model !== "deepseek-v4-flash") {
+      throw new InvalidArgumentError("model must be gpt-4o-mini or deepseek-v4-flash");
+    }
+    const settings = await readSettings(otterRoot);
+    await writeSettings(otterRoot, { ...settings, model });
+    process.stdout.write(`Analyzer model set to ${model}.\n`);
+  });
+
+config.command("set-execution <state>")
+  .description("enable or disable locally validated cleanup execution")
+  .action(async (state: string) => {
+    if (state !== "enabled" && state !== "disabled") {
+      throw new InvalidArgumentError("state must be enabled or disabled");
+    }
+    const settings = await readSettings(otterRoot);
+    await writeSettings(otterRoot, { ...settings, enableExecution: state === "enabled" });
+    process.stdout.write(`Execution ${state}.\n`);
   });
 
 config.command("set-api-key")
@@ -108,9 +125,8 @@ const trace = program.command("trace").description("inspect local redacted trace
 
 trace.command("list")
   .description("list recent trace files")
-  .option("--trace-root <path>", "trace directory")
-  .action(async (options: { traceRoot?: string }) => {
-    const root = options.traceRoot ?? await defaultTraceRoot();
+  .action(async () => {
+    const root = await defaultTraceRoot();
     const files = await readTraceStore(root).list();
     process.stdout.write(files.map((file) => `${file.runId} ${file.sizeBytes}`).join("\n"));
     if (files.length > 0) process.stdout.write("\n");
@@ -118,18 +134,16 @@ trace.command("list")
 
 trace.command("show <run-id>")
   .description("print a redacted JSONL trace")
-  .option("--trace-root <path>", "trace directory")
-  .action(async (runId: string, options: { traceRoot?: string }) => {
-    const root = options.traceRoot ?? await defaultTraceRoot();
+  .action(async (runId: string) => {
+    const root = await defaultTraceRoot();
     const events = await readTraceStore(root).show(runId);
     process.stdout.write(events.map((event) => JSON.stringify(event)).join("\n") + "\n");
   });
 
 trace.command("export <run-id>")
   .description("export a trace without process arguments")
-  .option("--trace-root <path>", "trace directory")
-  .action(async (runId: string, options: { traceRoot?: string }) => {
-    const root = options.traceRoot ?? await defaultTraceRoot();
+  .action(async (runId: string) => {
+    const root = await defaultTraceRoot();
     process.stdout.write(await readTraceStore(root).export(runId));
   });
 

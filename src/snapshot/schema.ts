@@ -70,6 +70,7 @@ export const vmProcessSchema = z.object({
 
 export const containerSchema = z.object({
   id: z.string().min(1),
+  startedAt: z.string().min(1),
   name: z.string().min(1),
   image: z.string().min(1),
   state: z.enum(["running", "paused", "exited", "restarting"]),
