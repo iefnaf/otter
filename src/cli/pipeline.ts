@@ -16,7 +16,11 @@ import type {
 } from "../executor/types.ts";
 import { killProcess, stopContainer } from "../executor/actions.ts";
 import { verifyAction } from "../executor/verify.ts";
-import { createTerminalConfirmation, type ConfirmationAdapter } from "./confirm.ts";
+import {
+  confirmationCandidate,
+  createTerminalConfirmation,
+  type ConfirmationAdapter,
+} from "./confirm.ts";
 import {
   collectServicePids,
 } from "../validator/revalidate.ts";
@@ -148,7 +152,7 @@ async function executeConfirmedCandidates(
   for (const candidate of validated) {
     if (candidate.eligibility.status !== "eligible") continue;
     const summary = summarizeValidatedCandidate(candidate);
-    const approved = await confirmation.confirm(summary);
+    const approved = await confirmation.confirm(confirmationCandidate(candidate));
     await appendTrace(trace, {
       eventType: "user_confirmed",
       payload: { candidateId: summary.candidateId, approved },

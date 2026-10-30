@@ -7,6 +7,7 @@ import { localReportSchema } from "../../src/reporter/local.ts";
 import { writeSettings } from "../../src/config/settings.ts";
 import { readTraceStore } from "../../src/trace/store.ts";
 import { createFixtureRunner, fixture, output } from "../helpers.ts";
+import type { ConfirmationCandidate } from "../../src/cli/confirm.ts";
 import type { CommandRunOptions, CommandRunner } from "../../src/collectors/types.ts";
 import type { ValidatedCandidateSummary } from "../../src/validator/safety.ts";
 
@@ -115,6 +116,7 @@ describe("guarded clean execution", () => {
     const runningInspection = await fixture("docker-inspect.json");
     const exitedInspection = runningInspection.replace('"running"', '"exited"');
     let stopped = false;
+    const confirmations: ConfirmationCandidate[] = [];
     const runner: CommandRunner = async (command, args, options: CommandRunOptions) => {
       if (command === "docker" && args[0] === "stop") {
         stopped = true;
@@ -138,10 +140,20 @@ describe("guarded clean execution", () => {
       commandRunner: runner,
       currentUser: "fanfei",
       isInteractive: () => true,
-      confirmation: { confirm: async () => true },
+      confirmation: {
+        confirm: async (candidate) => {
+          confirmations.push(candidate);
+          return true;
+        },
+      },
       revalidationWindowSeconds: 0.05,
     });
     expect(stopped).toBe(true);
+    expect(confirmations[0]?.target).toMatchObject({
+      kind: "container",
+      name: "project-cache",
+      state: "running",
+    });
     const events = await readTraceStore(roots.traceRoot).show(result.runId);
     const completed = events.find((event) => event.eventType === "run_completed");
     const report = localReportSchema.parse(completed?.payload.report);
