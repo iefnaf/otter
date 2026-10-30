@@ -70,7 +70,7 @@ describe("terminal cleanup confirmation", () => {
     expect(text).toContain("target process node, PID 1059");
     expect(text).toContain("owner fanfei");
     expect(text).toContain("running for 216.0 hours");
-    expect(text).toContain("CPU 0.0%");
+    expect(text).toContain("CPU 0.00%");
     expect(text).toContain("controlling terminal none");
     expect(text).toContain("listening port 3000");
     expect(text).not.toContain("--token");
@@ -84,7 +84,7 @@ describe("terminal cleanup confirmation", () => {
     expect(text).toContain("state running");
     expect(text).toContain("health healthy");
     expect(text).toContain("restart policy no");
-    expect(text).toContain("CPU 0.2%");
+    expect(text).toContain("CPU 0.20%");
     expect(text).toContain("memory 18.0 MB");
   });
 });

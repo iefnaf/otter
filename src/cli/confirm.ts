@@ -101,7 +101,7 @@ function targetLines(target: ConfirmationTarget): string[] {
   if (target.kind === "process") {
     const cpu = target.intervalCpuPercent === null
       ? "unknown"
-      : `${target.intervalCpuPercent.toFixed(1)}%`;
+      : `${target.intervalCpuPercent.toFixed(2)}%`;
     return [
       `target process ${target.executable}, PID ${target.pid}`,
       `owner ${target.user}`,
@@ -113,7 +113,7 @@ function targetLines(target: ConfirmationTarget): string[] {
   }
   const cpu = target.intervalCpuPercent === null
     ? "unknown"
-    : `${target.intervalCpuPercent.toFixed(1)}%`;
+    : `${target.intervalCpuPercent.toFixed(2)}%`;
   return [
     `target container ${target.name}, ID ${target.containerId.slice(0, 12)}`,
     `state ${target.state}`,
