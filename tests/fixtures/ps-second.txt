@@ -1,0 +1,4 @@
+  PID  PPID  PGID   USER   STAT TT  %CPU %MEM      RSS       VSZ LSTART                      ELAPSED CPUTIME COMMAND
+    1     0     1   root     Ss ??   0.0  0.1    16384    736256 Wed Oct 29 09:00:00 2025  10:00  00:01.10 /sbin/launchd
+  501     1   501 fanfei     Ss ttys  0.2  1.0  1048576   4194304 Wed Oct 29 09:01:00 2025  10:00  00:02.20 /bin/zsh
+  900     1   900 fanfei     R    ??  10.0  0.5   524288   2097152 Wed Oct 29 09:03:00 2025   00:02  00:00.20 /usr/bin/git status
