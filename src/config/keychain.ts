@@ -10,7 +10,8 @@ export async function setApiKey(
   const output = await runner(
     "security",
     ["add-generic-password", "-U", "-s", service, "-a", account, "-w"],
-    { timeoutMs: 10000, stdin: `${apiKey}\n` },
+    // The security prompt requires the password once and then a confirmation.
+    { timeoutMs: 10000, stdin: `${apiKey}\n${apiKey}\n` },
   );
   if (output.exitCode !== 0) {
     throw new Error(`Keychain write failed with code ${output.exitCode}`);
