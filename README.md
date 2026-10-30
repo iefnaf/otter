@@ -8,6 +8,10 @@ This is the v0.1 safety slice. Otter never executes cleanup commands. `scan`, `e
 
 The analyzer is deny-by-default. Without `--send-llm`, Otter makes no network request. With `--send-llm`, Otter sends only the projected payload shown by `--preview-payload`. Model output may contain findings and opinions about locally generated candidate IDs. It cannot contain recommendations, commands, target references, risk levels, or expected savings.
 
+## Design documents
+
+The current design draft and review history are in [docs/design](design/README.md).
+
 ## Use
 
 ```bash
