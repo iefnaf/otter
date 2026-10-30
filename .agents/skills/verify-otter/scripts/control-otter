@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# control-otter: isolated launch / doctor / drive / evidence / cleanup helper for verifying Otter.
+# Usage: see `control-otter help`. Every otter invocation runs with a throwaway HOME, so the
+# real ~/.otter (settings, traces) and the real Keychain entry are never read or written.
+set -uo pipefail
+
+SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="$(cd "$SKILL_DIR/../../.." && pwd)"
+BIN="$REPO/dist/otter"
+REAL_HOME="$HOME"
+IMAGE="${OTTER_VERIFY_IMAGE:-python:3.12-slim-bookworm}"
+
+die() { echo "control-otter: $*" >&2; exit 2; }
+
+resolve_run() {
+  RUN="${OTTER_VERIFY_RUN:-}"
+  if [ -z "$RUN" ]; then
+    local found=(/tmp/otter-verify-*/)
+    if [ "${#found[@]}" -eq 1 ] && [ -d "${found[0]}" ]; then
+      RUN="$(basename "${found[0]}")"; RUN="${RUN#otter-verify-}"
+    else
+      die "set OTTER_VERIFY_RUN (from \`control-otter launch\`); found ${#found[@]} candidate run dirs"
+    fi
+  fi
+  SB="/tmp/otter-verify-$RUN"
+  [ -d "$SB/home" ] || die "no sandbox at $SB (run \`control-otter launch\` first)"
+  EVID="$SKILL_DIR/evidence/$RUN"
+  SOCK="otter-verify-$RUN"
+  DISPOSABLE="otter-verify-$RUN"
+  CONTROL="otter-verify-$RUN-control"
+}
+
+# The otter binary under the sandbox HOME. DOCKER_CONFIG keeps the real docker context reachable.
+# API keys are unset so nothing can reach a real analyzer by accident.
+otter() {
+  env -u OPENAI_API_KEY -u DEEPSEEK_API_KEY HOME="$SB/home" DOCKER_CONFIG="$REAL_HOME/.docker" "$BIN" "$@"
+}
+
+real_trace_count() { ls "$REAL_HOME/.otter/traces" 2>/dev/null | wc -l | tr -d ' '; }
+
+cmd_launch() {
+  command -v bun >/dev/null || die "bun not found"
+  command -v tmux >/dev/null || die "tmux not found (needed for the clean confirmation prompt)"
+  cd "$REPO" || exit 2
+  [ -d node_modules ] || bun install --frozen-lockfile || die "bun install failed"
+  bun run build >/dev/null 2>&1 || die "bun run build failed"
+  local run; run="$(date +%Y%m%dT%H%M%S)-$$"
+  RUN="$run"; SB="/tmp/otter-verify-$RUN"; EVID="$SKILL_DIR/evidence/$RUN"
+  mkdir -p "$SB/home" "$EVID"
+  # Evidence is kept out of git by a self-ignoring .gitignore.
+  printf '*\n!.gitignore\n' > "$SKILL_DIR/evidence/.gitignore"
+  real_trace_count > "$SB/real-trace-count"
+  {
+    echo "run=$RUN"
+    echo "git_head=$(git rev-parse --short HEAD) dirty_files=$(git status --porcelain | wc -l | tr -d ' ')"
+    echo "binary=$BIN sha256=$(shasum -a 256 "$BIN" | cut -c1-16)"
+    echo "otter_version=$("$BIN" --version)"
+    echo "real_trace_count_at_launch=$(cat "$SB/real-trace-count")"
+  } | tee "$EVID/launch.txt"
+  # Ready = the binary starts and reads empty-state settings from the sandbox HOME.
+  otter config show | tee -a "$EVID/launch.txt" | grep -q '"enableExecution": false' || die "sandbox config show did not report the default state"
+  echo "READY. Next: export OTTER_VERIFY_RUN=$RUN"
+}
+
+cmd_doctor() {
+  local bad=0
+  ok() { echo "ok   $*"; }; no() { echo "FAIL $*"; bad=1; }
+  command -v bun >/dev/null && ok "bun $(bun --version)" || no "bun missing"
+  command -v tmux >/dev/null && ok "tmux present" || no "tmux missing"
+  if docker info >/dev/null 2>&1; then ok "docker daemon reachable"; else echo "warn docker daemon unavailable (container features cannot be driven)"; fi
+  [ -x "$BIN" ] && ok "binary $BIN ($("$BIN" --version))" || { no "binary missing: run launch"; exit 1; }
+  local stale; stale="$(cd "$REPO" && find src package.json -newer dist/otter -type f | head -3)"
+  [ -z "$stale" ] && ok "binary is newer than src/" || no "binary older than: $stale (re-run launch)"
+  resolve_run
+  ok "run $RUN sandbox $SB"
+  [ "$SB/home" != "$REAL_HOME" ] && ok "sandbox HOME differs from real HOME" || no "sandbox HOME is the real HOME"
+  [ "$(real_trace_count)" = "$(cat "$SB/real-trace-count")" ] && ok "real ~/.otter/traces unchanged ($(real_trace_count) files)" || no "real ~/.otter/traces changed since launch"
+  [ -f "$SB/home/.otter/settings.json" ] && ok "sandbox settings: $(tr -d '\n ' < "$SB/home/.otter/settings.json")" || ok "sandbox settings: defaults (no file)"
+  if tmux -L "$SOCK" ls >/dev/null 2>&1; then ok "tmux session on socket $SOCK"; else ok "no tmux session yet"; fi
+  for n in "$DISPOSABLE" "$CONTROL"; do
+    s="$(docker inspect -f '{{.State.Status}}' "$n" 2>/dev/null || true)"; echo "info container $n: ${s:-absent}"
+  done
+  exit $bad
+}
+
+# run <feature> <label> -- <otter args...>: non-interactive drive with a saved transcript.
+cmd_run() {
+  resolve_run
+  local feature="${1:?feature}" label="${2:?label}"; shift 2
+  [ "${1:-}" = "--" ] && shift
+  local d="$EVID/$feature"; mkdir -p "$d"
+  otter "$@" > "$d/$label.stdout" 2> "$d/$label.stderr" < /dev/null
+  local rc=$?
+  echo "$rc" > "$d/$label.exit"
+  { echo "\$ otter $*"; echo "--- stdout"; cat "$d/$label.stdout"; echo "--- stderr"; cat "$d/$label.stderr"; echo "--- exit $rc"; } > "$d/$label.txt"
+  cat "$d/$label.txt" | head -${OTTER_VERIFY_MAXLINES:-60}
+  echo "[saved $d/$label.txt]"
+  return $rc
+}
+
+# note <feature> <label> -- <read-only command...>: record a second view (docker inspect, ls, jq).
+cmd_note() {
+  resolve_run
+  local feature="${1:?feature}" label="${2:?label}"; shift 2
+  [ "${1:-}" = "--" ] && shift
+  local d="$EVID/$feature"; mkdir -p "$d"
+  { echo "\$ $*"; "$@" 2>&1; echo "--- exit $?"; } | tee "$d/$label.txt"
+}
+
+cmd_fixture() {
+  resolve_run
+  case "${1:-}" in
+    up)
+      docker image inspect "$IMAGE" >/dev/null 2>&1 || die "image $IMAGE not local (set OTTER_VERIFY_IMAGE); not pulling automatically"
+      docker run -d --pull=never --name "$DISPOSABLE" --label otter.disposable=true --label "otter.verify-run=$RUN" "$IMAGE" sleep 3600 >/dev/null || die "docker run failed"
+      docker run -d --pull=never --name "$CONTROL" --label "otter.verify-run=$RUN" "$IMAGE" sleep 3600 >/dev/null || die "docker run (control) failed"
+      for n in "$DISPOSABLE" "$CONTROL"; do
+        [ "$(docker inspect -f '{{.State.Running}}' "$n")" = true ] || die "$n not running"
+      done
+      echo "fixture up: disposable=$DISPOSABLE (label otter.disposable=true) control=$CONTROL (no label)" ;;
+    down)
+      docker rm -f "$DISPOSABLE" "$CONTROL" >/dev/null 2>&1; echo "fixture down" ;;
+    state)
+      local out="disposable=$(docker inspect -f '{{.State.Status}}' "$DISPOSABLE" 2>/dev/null || echo absent) control=$(docker inspect -f '{{.State.Status}}' "$CONTROL" 2>/dev/null || echo absent)"
+      echo "$out"
+      if [ -n "${2:-}" ] && [ -n "${3:-}" ]; then mkdir -p "$EVID/$2"; echo "$out" > "$EVID/$2/$3.txt"; fi ;;
+    name) echo "$DISPOSABLE"; ;;
+    *) die "fixture up|down|state [feature label]|name" ;;
+  esac
+}
+
+cmd_tty() {
+  resolve_run
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    start) # tty start [-- otter args]   (default: clean --window 1)
+      [ "${1:-}" = "--" ] && shift
+      [ "$#" -eq 0 ] && set -- clean --window 1
+      tmux -L "$SOCK" kill-server 2>/dev/null
+      tmux -L "$SOCK" start-server \; set-option -g history-limit 100000 \; new-session -d -s otter -x 150 -y 60 \
+        "env -u OPENAI_API_KEY -u DEEPSEEK_API_KEY HOME='$SB/home' DOCKER_CONFIG='$REAL_HOME/.docker' '$BIN' $*; echo OTTER_EXIT=\$?; sleep 3600"
+      echo "tty started: otter $*" ;;
+    screen) tmux -L "$SOCK" capture-pane -J -p -S - ;;
+    send) tmux -L "$SOCK" send-keys "$@" ;;
+    wait) # tty wait <fixed string> [timeout seconds]
+      local pat="${1:?pattern}" t="${2:-60}" i=0
+      while [ "$i" -lt $((t * 2)) ]; do
+        tmux -L "$SOCK" capture-pane -J -p -S - | grep -qF -- "$pat" && { echo "seen: $pat"; return 0; }
+        sleep 0.5; i=$((i + 1))
+      done
+      echo "timeout waiting for: $pat" >&2; return 1 ;;
+    drive-clean) # tty drive-clean <feature> <label> <approve-container-name|none>
+      # Answers each confirmation prompt. The prompt ends with "Type <answer> to stop this
+      # container|process: ". Only a container prompt whose "target container <name>," line
+      # matches the approved fixture name gets the typed name; every other prompt (including all
+      # real processes on this machine) gets "n", which Otter treats as a decline.
+      local feature="${1:?feature}" label="${2:?label}" approve="${3:?container name or none}"
+      local d="$EVID/$feature"; mkdir -p "$d"
+      local answered=0 i=0 log="$d/$label.decisions.txt"; : > "$log"
+      while [ "$i" -lt 480 ]; do   # 4 minutes
+        local screen; screen="$(tmux -L "$SOCK" capture-pane -J -p -S -)"
+        if grep -qF "OTTER_EXIT=" <<<"$screen"; then break; fi
+        local total; total="$(grep -cE '^Type .* to stop this (container|process): ' <<<"$screen")"
+        if [ "$total" -gt "$answered" ]; then
+          # Block n = text from the n-th "Otter cleanup candidate" header through its "Type ..." line.
+          local block; block="$(awk -v n=$((answered + 1)) '/^Otter cleanup candidate/{c++} c==n{print} c==n && /^Type .* to stop this (container|process): /{exit}' <<<"$screen")"
+          local key=n
+          if [ "$approve" != none ] && grep -qF "target container $approve," <<<"$block" && grep -qF "Type $approve to stop this container: " <<<"$block"; then key="$approve"; fi
+          { echo "=== prompt $((answered + 1)) -> $key"; echo "$block"; } >> "$log"
+          tmux -L "$SOCK" send-keys -l "$key"; tmux -L "$SOCK" send-keys Enter
+          answered=$((answered + 1))
+        else
+          sleep 0.5; i=$((i + 1))
+        fi
+      done
+      tmux -L "$SOCK" capture-pane -J -p -S - > "$d/$label.screen.txt"
+      echo "answered $answered prompt(s); decisions: $log; final screen: $d/$label.screen.txt"
+      grep -F "OTTER_EXIT=" "$d/$label.screen.txt" || { echo "otter did not exit within 4 minutes" >&2; return 1; } ;;
+    stop) tmux -L "$SOCK" kill-server 2>/dev/null; echo "tty stopped" ;;
+    *) die "tty start|screen|send|wait|drive-clean|stop" ;;
+  esac
+}
+
+cmd_cleanup() {
+  resolve_run
+  tmux -L "$SOCK" kill-server 2>/dev/null
+  docker rm -f "$DISPOSABLE" "$CONTROL" >/dev/null 2>&1
+  [ "$(real_trace_count)" = "$(cat "$SB/real-trace-count" 2>/dev/null)" ] && echo "real ~/.otter/traces unchanged" || echo "WARNING: real ~/.otter/traces count changed"
+  rm -rf "$SB"
+  echo "cleaned run $RUN. Evidence kept at: $EVID"
+  ls "$EVID"
+}
+
+case "${1:-help}" in
+  launch) cmd_launch ;;
+  doctor) shift; cmd_doctor ;;
+  run) shift; cmd_run "$@" ;;
+  note) shift; cmd_note "$@" ;;
+  fixture) shift; cmd_fixture "$@" ;;
+  tty) shift; cmd_tty "$@" ;;
+  cleanup) cmd_cleanup ;;
+  *) sed -n '2,3p' "$0"; echo "commands: launch | doctor | run <feature> <label> -- <otter args> | note <feature> <label> -- <cmd> | fixture up|down|state|name | tty start|screen|send|wait|drive-clean|stop | cleanup" ;;
+esac
