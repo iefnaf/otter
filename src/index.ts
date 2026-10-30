@@ -2,6 +2,7 @@
 import { Command, InvalidArgumentError } from "commander";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { diagnosticOptionsFromCli, type DiagnosticCliOptions } from "./cli/options.ts";
 import { runDiagnostic } from "./cli/pipeline.ts";
 import { localCommandRunner } from "./collectors/runner.ts";
 import { clearApiKey, getApiKey, setApiKey } from "./config/keychain.ts";
@@ -45,26 +46,13 @@ function addDiagnosticOptions(command: Command): Command {
 
 async function executeDiagnostic(
   command: "scan" | "explain" | "clean",
-  options: {
-    json?: boolean;
-    localOnly?: boolean;
-    previewPayload?: boolean;
-    sendLlm?: boolean;
-    dryRun?: boolean;
-    verbose?: boolean;
-    window: number;
-  },
+  options: DiagnosticCliOptions,
 ): Promise<void> {
-  const result = await runDiagnostic({
-    command,
-    json: options.json === true || process.stdout.isTTY !== true,
-    localOnly: options.localOnly === true,
-    previewPayload: options.previewPayload === true,
-    sendLlm: options.sendLlm === true,
-    windowSeconds: options.window,
+  const result = await runDiagnostic(diagnosticOptionsFromCli(command, options, {
+    stdoutIsTty: process.stdout.isTTY === true,
     traceRoot: await defaultTraceRoot(),
     configRoot: otterRoot,
-  });
+  }));
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
   process.exitCode = result.exitCode;

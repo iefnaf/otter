@@ -7,7 +7,7 @@
 - `scan-json` prints a schema-versioned JSON report with machine, process, port, Docker, and candidate fields.
 - `scan-human` prints the compact text report on a TTY: a `Otter clean plan` header, `System pressure`, `Review required`, `Blocked summary`, and `Details`.
 - `scan-explain` runs `explain`, which is the same local report in explain mode.
-- `scan-verbose` accepts `--verbose` for a longer terminal report.
+- `scan-verbose` prints the complete candidate list on a TTY instead of the compact plan.
 - `scan-window` validates `--window` (integer 0 through 10).
 - `scan-docker` reports Docker availability and counts disposable containers as candidates.
 - `scan-noexec` always reports execution as not available.
@@ -26,6 +26,7 @@ Preconditions: `$C doctor` exits 0. Docker is running. For `scan-docker`, `$C fi
 - **Piped output is JSON without the flag.** Run `$C run scan piped -- scan --window 1`. Stdout is the same JSON shape.
 - **Human report.** Run `$C tty start -- scan --window 1`, then `$C tty wait "OTTER_EXIT=" 60`, then `$C tty screen > .agents/skills/verify-otter/evidence/$OTTER_VERIFY_RUN/scan/human.screen.txt` (create the directory first with `mkdir -p`). The screen starts with `Otter clean plan · run <id>` and contains `System pressure`, `Review required · N of M`, `Blocked summary`, and `Details`, `execution not_available: Execution is available only in clean mode.`, and ends with `OTTER_EXIT=0`. Then `$C tty stop`.
 - **Explain.** Run `$C run scan explain -- explain --json --window 1`. Exit `0`, `execution.status` is `not_available`.
+- **Verbose.** Capture the TTY screen twice, `$C tty start -- scan --window 1` and `$C tty start -- scan --verbose --window 1`, each waiting for `OTTER_EXIT=` and saved with `$C tty screen | grep -v '^$' > <file>`. The default screen is about 24 lines; the verbose screen lists every candidate and is hundreds of lines longer.
 - **Fixture in the plan.** With the fixture up, the `Review required` list includes `otter-verify-<id> · container` with `action: review required before stopping`. Protected network services such as Tailscale or Clash, if running, appear there with `action: protected by the network-service rule`.
 - **Docker candidate.** With the fixture up, run `$C run scan docker -- scan --json --window 1` and read `docker.disposableCandidates`. It is `1`, and `validatedCandidates` contains one entry with `"kind": "container"`, `"eligibility": "eligible"`, `"decision": "review_required"`. `$C note scan docker-ps -- docker ps --filter label=otter.disposable=true --format '{{.Names}}'` shows the same container as the second view.
 - **No execution.** In the same JSON, `execution.status` is `not_available` and `execution.results` is empty.
@@ -40,4 +41,3 @@ Preconditions: `$C doctor` exits 0. Docker is running. For `scan-docker`, `$C fi
 - Docker collection takes about 5 seconds regardless of `--window`, so a run takes at least that long.
 - Each scan writes a trace file, so scans change the trace list. The disposable-container candidate count only means anything with `fixture up`.
 - Container names are not in the JSON report (the redacted payload hashes them). Use the `clean` prompt or `docker ps` to identify a container.
-- `--verbose` is parsed but `src/index.ts` does not forward it to `runDiagnostic`, so the screen is the same as without it (verified: only the data differs). Do not report `--verbose` as verified until that is wired.

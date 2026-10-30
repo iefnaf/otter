@@ -9,7 +9,7 @@
 - `clean-gate-localonly` refuses execution with `--local-only`.
 - `clean-decline` leaves everything running when the user answers anything other than the exact text.
 - `clean-approve` stops the approved disposable container and verifies it.
-- `clean-dryrun` is meant to collect and validate without prompting or executing (currently broken, see Gotchas).
+- `clean-dryrun` collects and validates without prompting or executing, and refuses `--send-llm`.
 - `clean-control` never offers or touches a container without `otter.disposable=true`.
 - `clean-audit` records `user_confirmed`, `action_executed`, and `action_verified` in the trace.
 
@@ -29,8 +29,9 @@ Preconditions: fresh launch, `$C doctor` exits 0, Docker running, `$C fixture up
 - **Decline.** `$C tty start -- clean --window 1`, then `$C tty drive-clean clean-decline run none`, then `$C fixture state clean-decline after`. The decisions file shows one prompt that names `target container otter-verify-<id>,` and ends `Type otter-verify-<id> to stop this container:`, answered `n`. The screen ends `execution complete: Per-candidate interactive confirmation is active.` and `OTTER_EXIT=0`. `fixture state` prints `disposable=running control=running`. Then `$C tty stop`.
 - **Approve.** `$C tty start -- clean --window 1`, then `$C tty drive-clean clean-approve run "$($C fixture name)"`, then `$C fixture state clean-approve after`. The decisions file shows the prompt answered with the typed container name. The screen ends with `action results 1 succeeded`. `fixture state` prints `disposable=exited control=running`. Then `$C tty stop`.
 - **Audit.** `$C run trace list -- trace list`, then `$C run clean-audit show -- trace show <top run id>`. The events include `user_confirmed` with `approved: true`, `action_executed` with `status: succeeded`, `action_verified` with `status: verified`.
-- **Dry run (expected to fail today).** `$C run clean-dryrun json -- clean --dry-run --json --window 1`: expect `execution.reason` `Dry-run mode collects and validates but never executes.` The current binary instead reports `JSON output cannot provide the required per-candidate confirmation.`, because `dryRun` is parsed in `src/index.ts` but not passed to `runDiagnostic`. On a TTY, `$C tty start -- clean --dry-run --window 1` still shows `Type otter-verify-<id> to stop this container:`. Stop it with `$C tty stop` and report the journey as failed; do not weaken it.
-- **Dry run with analyzer (also fails today).** `$C run clean-dryrun llm -- clean --dry-run --send-llm` should exit `2` with `--dry-run does not send an analyzer request`; it exits `4` with `NO_API_KEY`.
+- **Dry run (JSON).** With execution enabled, `$C run clean-dryrun json -- clean --dry-run --json --window 1`. `execution.status` is `not_available` with reason `Dry-run mode collects and validates but never executes.`, and `execution.enabled` is `false`.
+- **Dry run (TTY).** `$C tty start -- clean --dry-run --window 1`, `$C tty wait "OTTER_EXIT=" 90`, `$C tty screen`. The screen has no `Type ... to stop` line, ends with `execution not_available: Dry-run mode collects and validates but never executes.`, `action results none`, and `OTTER_EXIT=0`. `$C fixture state clean-dryrun after` prints `disposable=running control=running`. `trace show <run id>` has exactly `collection_started, collection_completed, redaction_applied, recommendations_validated, run_completed`: no `user_confirmed`, no `action_executed`.
+- **Dry run with analyzer.** `$C run clean-dryrun llm -- clean --dry-run --send-llm`. Exit `2`, stderr `--dry-run does not send an analyzer request`.
 - **Reset.** `$C run clean disable -- config set-execution disabled`.
 
 ## Gotchas
@@ -38,7 +39,7 @@ Preconditions: fresh launch, `$C doctor` exits 0, Docker running, `$C fixture up
 - Real processes on this Mac may also be eligible (user-owned, listening, no terminal, over eight hours, under 1 percent CPU, not in `launchctl`). Their prompts appear in `drive-clean` and are answered `n`. Never approve a prompt that does not name the fixture container.
 - Only `clean` after `fixture up` has a container prompt. Without the fixture the screen may show no prompt and `drive-clean` reports `answered 0`.
 - A prompt for a process with no listening port expects `y`; one for a listening process expects `<executable> <pid>`. `drive-clean` types `n` for all of them.
-- Never run `clean --dry-run` on a TTY with execution enabled and an answerable prompt: until `dryRun` is forwarded it behaves like a normal `clean`.
+- A binary built before `dryRun` was forwarded from `src/index.ts` prompts under `--dry-run`. `doctor` flags a stale binary; if the dry-run TTY screen shows a `Type ... to stop` line, stop it with `$C tty stop`, rebuild with `launch`, and report the failure.
 - Approving stops the container; running `clean` again finds nothing eligible. Re-run `fixture down` then `fixture up` to repeat.
 - The `kill_process` path is not drivable here: it needs a real stale listener older than eight hours. Report it as unverified; `tests/executor/actions.test.ts` covers it.
 - `clean` takes about 10 seconds: Docker collection, then revalidation before the action.
