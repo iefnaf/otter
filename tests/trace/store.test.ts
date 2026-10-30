@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openTraceStore, readTraceStore } from "../../src/trace/store.ts";
 import { redactSnapshot } from "../../src/redactor/redact.ts";
-import { createLocalReport } from "../../src/reporter/local.ts";
+import { createLocalReport, localReportSchema } from "../../src/reporter/local.ts";
 import { snapshotFixture } from "../helpers.ts";
 
 describe("trace store", () => {
@@ -40,6 +40,33 @@ describe("trace store", () => {
     const exported = await store.export("20261030T000000-abcdef");
     expect(exported.includes("--token")).toBe(false);
     expect(exported.includes("processArgumentsOmitted")).toBe(true);
+  });
+
+  test("continues to read traces that contain the old risk vocabulary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "otter-legacy-trace-"));
+    const snapshot = snapshotFixture();
+    const redacted = redactSnapshot(snapshot, {
+      runId: "20261029T000000-abcdef",
+      currentUser: "fanfei",
+    });
+    const report = localReportSchema.parse({
+      ...createLocalReport(redacted.payload, "local"),
+      validatedCandidates: [{
+        candidateId: "cand_8aacb1da708f",
+        kind: "process",
+        actionType: "kill_process",
+        eligibility: "eligible",
+        riskLevel: "safe",
+        blastRadius: "process candidate, 1 listening port(s)",
+        observedBenefit: "10.0 MB RSS currently occupied; release is not guaranteed",
+      }],
+    });
+    const store = await openTraceStore(root, "20261029T000000-abcdef", "scan", 0);
+    await store.append({
+      eventType: "run_completed",
+      payload: { report },
+    });
+    await expect(store.show("20261029T000000-abcdef")).resolves.toBeArray();
   });
 
   test("keeps only the newest one hundred traces", async () => {

@@ -7,7 +7,7 @@ import {
 } from "../../src/cli/confirm.ts";
 import type { ValidatedCandidate } from "../../src/validator/safety.ts";
 
-function processCandidate(): ValidatedCandidate {
+function listeningProcessCandidate(): ValidatedCandidate {
   return {
     candidate: {
       candidateId: "cand_8aacb1da708f",
@@ -25,9 +25,34 @@ function processCandidate(): ValidatedCandidate {
       listeningPorts: [3000],
     },
     eligibility: { status: "eligible", checks: [] },
-    riskLevel: "safe",
-    blastRadius: "process candidate, 1 listening port(s)",
+    decision: "review_required",
+    target: {
+      kind: "process",
+      executable: "node",
+      pid: 1059,
+      user: "fanfei",
+      elapsedHours: 216,
+      hasControllingTerminal: false,
+      intervalCpuPercent: 0,
+      rssMb: 10,
+      listeningPorts: [3000],
+    },
+    checks: [],
+    primaryReason: null,
+    impact: "Clients using port 3000 lose connectivity when this process stops.",
     observedBenefit: "10.0 MB RSS currently occupied; release is not guaranteed",
+    protection: null,
+  };
+}
+
+function terminallessProcessCandidate(): ValidatedCandidate {
+  const listening = listeningProcessCandidate();
+  if (listening.target.kind !== "process") throw new Error("fixture must be a process");
+  return {
+    ...listening,
+    target: { ...listening.target, listeningPorts: [] },
+    decision: "eligible",
+    impact: "Stopping this process may end a user session.",
   };
 }
 
@@ -47,44 +72,63 @@ function containerCandidate(): ValidatedCandidate {
       memoryUsageMb: 18,
     },
     eligibility: { status: "eligible", checks: [] },
-    riskLevel: "safe",
-    blastRadius: "container candidate",
-    observedBenefit: "18.0 MB RSS currently occupied; release is not guaranteed",
+    decision: "review_required",
+    target: {
+      kind: "container",
+      name: "project-cache",
+      containerId: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+      startedAt: "2026-10-01T00:00:00.000Z",
+      state: "running",
+      health: "healthy",
+      restartPolicy: "no",
+      intervalCpuPercent: 0.2,
+      memoryUsageMb: 18,
+    },
+    checks: [],
+    primaryReason: null,
+    impact: "Stopping this container affects the workload in that container.",
+    observedBenefit: "18.0 MB currently occupied; release is not guaranteed",
+    protection: null,
   };
 }
 
-async function renderApproval(candidate: ConfirmationCandidate): Promise<string> {
+async function approve(
+  candidate: ConfirmationCandidate,
+  answer: string,
+): Promise<{ approved: boolean; prompt: string }> {
   const input = new PassThrough();
   const output = new PassThrough();
   const confirmation = createTerminalConfirmation(input, output);
-  const answer = confirmation.confirm(candidate);
-  input.end("n\n");
-  await answer;
-  return output.read()?.toString() ?? "";
+  const result = confirmation.confirm(candidate);
+  input.end(`${answer}\n`);
+  return { approved: await result, prompt: output.read()?.toString() ?? "" };
 }
 
 describe("terminal cleanup confirmation", () => {
-  test("identifies a process without exposing its arguments", async () => {
-    const text = await renderApproval(confirmationCandidate(processCandidate()));
+  test("a listening process requires its exact executable and PID", async () => {
+    const candidate = confirmationCandidate(listeningProcessCandidate());
+    const rejected = await approve(candidate, "y");
+    const accepted = await approve(candidate, "node 1059");
 
-    expect(text).toContain("target process node, PID 1059");
-    expect(text).toContain("owner fanfei");
-    expect(text).toContain("running for 216.0 hours");
-    expect(text).toContain("CPU 0.00%");
-    expect(text).toContain("controlling terminal none");
-    expect(text).toContain("listening port 3000");
-    expect(text).not.toContain("--token");
-    expect(text).not.toContain("secret-token-value");
+    expect(rejected.approved).toBe(false);
+    expect(accepted.approved).toBe(true);
+    expect(accepted.prompt).toContain("This stops node, PID 1059.");
+    expect(accepted.prompt).toContain("Clients using port 3000 lose connectivity");
+    expect(accepted.prompt).toContain("Type node 1059 to stop this process:");
+    expect(accepted.prompt).not.toContain("secret-token-value");
   });
 
-  test("identifies a disposable container before approval", async () => {
-    const text = await renderApproval(confirmationCandidate(containerCandidate()));
+  test("a process with no service impact accepts explicit yes", async () => {
+    const result = await approve(confirmationCandidate(terminallessProcessCandidate()), "yes");
+    expect(result.approved).toBe(true);
+    expect(result.prompt).toContain("Stopping this process may end a user session.");
+  });
 
-    expect(text).toContain("target container project-cache, ID abcdef012345");
-    expect(text).toContain("state running");
-    expect(text).toContain("health healthy");
-    expect(text).toContain("restart policy no");
-    expect(text).toContain("CPU 0.20%");
-    expect(text).toContain("memory 18.0 MB");
+  test("a container requires its exact name", async () => {
+    const candidate = confirmationCandidate(containerCandidate());
+    expect((await approve(candidate, "y")).approved).toBe(false);
+    const accepted = await approve(candidate, "project-cache");
+    expect(accepted.approved).toBe(true);
+    expect(accepted.prompt).toContain("This stops container project-cache.");
   });
 });

@@ -64,8 +64,17 @@ async function readEvents(root: string, runId: string): Promise<TraceEvent[]> {
     .map((line) => traceEventSchema.parse(JSON.parse(line)));
 }
 
+async function readDirectoryEntries(root: string): Promise<string[]> {
+  try {
+    return await readdir(root);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("ENOENT")) return [];
+    throw error;
+  }
+}
+
 async function rotate(root: string): Promise<void> {
-  const entries = await readdir(root);
+  const entries = await readDirectoryEntries(root);
   const files: { name: string; updatedAtMs: number }[] = [];
   for (const entry of entries) {
     if (!entry.endsWith(".jsonl")) continue;
@@ -129,7 +138,7 @@ export async function openTraceStore(
       return event;
     },
     async list() {
-      const entries = await readdir(root);
+      const entries = await readDirectoryEntries(root);
       const files: TraceFile[] = [];
       for (const entry of entries) {
         if (!entry.endsWith(".jsonl")) continue;
@@ -159,7 +168,7 @@ export function readTraceStore(root: string): Omit<TraceStore, "append"> {
   return {
     root,
     async list() {
-      const entries = await readdir(root);
+      const entries = await readDirectoryEntries(root);
       const files: TraceFile[] = [];
       for (const entry of entries) {
         if (!entry.endsWith(".jsonl")) continue;

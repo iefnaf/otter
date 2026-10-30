@@ -5,6 +5,7 @@ import { z } from "zod";
 export const settingsSchema = z.strictObject({
   model: z.enum(["gpt-4o-mini", "deepseek-v4-flash"]).default("gpt-4o-mini"),
   enableExecution: z.boolean().default(false),
+  protectedExecutables: z.array(z.string().min(1)).default([]),
 });
 
 export type Settings = z.infer<typeof settingsSchema>;
