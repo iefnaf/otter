@@ -150,22 +150,24 @@ cmd_tty() {
       done
       echo "timeout waiting for: $pat" >&2; return 1 ;;
     drive-clean) # tty drive-clean <feature> <label> <approve-container-name|none>
-      # Answers each confirmation prompt: y only when the prompt names the approved container,
-      # n for everything else (real processes on this machine must never be approved).
+      # Answers each confirmation prompt. The prompt ends with "Type <answer> to stop this
+      # container|process: ". Only a container prompt whose "target container <name>," line
+      # matches the approved fixture name gets the typed name; every other prompt (including all
+      # real processes on this machine) gets "n", which Otter treats as a decline.
       local feature="${1:?feature}" label="${2:?label}" approve="${3:?container name or none}"
       local d="$EVID/$feature"; mkdir -p "$d"
       local answered=0 i=0 log="$d/$label.decisions.txt"; : > "$log"
       while [ "$i" -lt 480 ]; do   # 4 minutes
         local screen; screen="$(tmux -L "$SOCK" capture-pane -J -p -S -)"
         if grep -qF "OTTER_EXIT=" <<<"$screen"; then break; fi
-        local total; total="$(grep -cF "Approve this exact candidate" <<<"$screen")"
+        local total; total="$(grep -cE '^Type .* to stop this (container|process): ' <<<"$screen")"
         if [ "$total" -gt "$answered" ]; then
-          # Block n = text from the n-th "Otter cleanup candidate" header up to its approval line.
-          local block; block="$(awk -v n=$((answered + 1)) '/^Otter cleanup candidate/{c++} c==n{print} c==n && /Approve this exact candidate/{exit}' <<<"$screen")"
+          # Block n = text from the n-th "Otter cleanup candidate" header through its "Type ..." line.
+          local block; block="$(awk -v n=$((answered + 1)) '/^Otter cleanup candidate/{c++} c==n{print} c==n && /^Type .* to stop this (container|process): /{exit}' <<<"$screen")"
           local key=n
-          if [ "$approve" != none ] && grep -qF "target container $approve," <<<"$block"; then key=y; fi
+          if [ "$approve" != none ] && grep -qF "target container $approve," <<<"$block" && grep -qF "Type $approve to stop this container: " <<<"$block"; then key="$approve"; fi
           { echo "=== prompt $((answered + 1)) -> $key"; echo "$block"; } >> "$log"
-          tmux -L "$SOCK" send-keys "$key" Enter
+          tmux -L "$SOCK" send-keys -l "$key"; tmux -L "$SOCK" send-keys Enter
           answered=$((answered + 1))
         else
           sleep 0.5; i=$((i + 1))

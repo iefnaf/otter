@@ -14,9 +14,9 @@ This directory is the maintained source for verifying the user-facing behavior o
 - Always pass `--window 1`.
 - Non-interactive commands: `$C run <feature> <label> -- <otter args>`. Output is JSON for `scan`, `explain`, and `clean` because stdout is a pipe.
 - Human-rendered reports and `clean` prompts: `$C tty ...` (real PTY). Wait for literal strings, not fixed sleeps.
-- `clean` prompts are answered with `$C tty drive-clean`. Real machine processes get `n`. Only the fixture container is ever approved.
+- `clean` prompts are answered with `$C tty drive-clean`. Real machine processes get `n`. Only the fixture container is ever approved, by typing its exact name.
 - Candidate IDs (`cand_...`) and run IDs change on every run. Match on kind, action, and eligibility, not IDs.
-- Start each feature from the state its preconditions name. Settings persist in the sandbox between features, so reset with `config set-execution disabled` and `config set-model gpt-4o-mini` when a recipe says so.
+- Start each feature from the state its preconditions name. Settings persist in the sandbox between features, so reset with `config set-execution disabled`, `config set-model gpt-4o-mini`, and `protect remove <name>` when a recipe says so.
 
 ## Proof and skip reporting
 
@@ -35,5 +35,6 @@ Each feature file starts with an H1 and one paragraph, then these H2 sections in
 - [Scan and explain](./scan.md) covers the local snapshot in JSON and human form, option validation, and exit codes.
 - [Payload preview and analyzer gate](./payload-privacy.md) covers `--preview-payload`, redaction, and the no-network default for `--send-llm`.
 - [Configuration](./config.md) covers `config show`, `set-model`, `set-execution`, validation, and the settings file.
-- [Traces](./trace.md) covers `trace list|show|export`, event order, private modes, and argument redaction.
-- [Guarded cleanup](./clean.md) covers every execution gate, the interactive confirmation, decline, and approve of a disposable container.
+- [Traces and history](./trace.md) covers `trace list|show|export`, `history`, event order, private modes, and argument redaction.
+- [Protection rules](./protect.md) covers `protect add|list|remove` and built-in network-service rules.
+- [Guarded cleanup](./clean.md) covers every execution gate, the typed confirmation, decline, approve of a disposable container, and `--dry-run`.

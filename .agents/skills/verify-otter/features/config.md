@@ -24,7 +24,7 @@ Preconditions: fresh launch (no settings file in the sandbox).
 - **Reject model.** Run `$C run config bad-model -- config set-model gpt-5`. Exit `2`, stderr `model must be gpt-4o-mini or deepseek-v4-flash`. `config show` still shows `deepseek-v4-flash`.
 - **Reject state.** Run `$C run config bad-exec -- config set-execution maybe`. Exit `2`, stderr `state must be enabled or disabled`.
 - **Enable and disable.** Run `$C run config enable -- config set-execution enabled`, then `show`, then `$C run config disable -- config set-execution disabled` and `show` again. The flag follows each command.
-- **File proof.** `$C note config settings-file -- bash -c 'ls -l /tmp/otter-verify-'$OTTER_VERIFY_RUN'/home/.otter/settings.json; cat /tmp/otter-verify-'$OTTER_VERIFY_RUN'/home/.otter/settings.json'` shows `-rw-------` and exactly the keys `model` and `enableExecution`.
+- **File proof.** `$C note config settings-file -- bash -c 'ls -l /tmp/otter-verify-'$OTTER_VERIFY_RUN'/home/.otter/settings.json; cat /tmp/otter-verify-'$OTTER_VERIFY_RUN'/home/.otter/settings.json'` shows `-rw-------` and exactly the keys `model`, `enableExecution`, and `protectedExecutables`.
 - **Reset.** Finish with `config set-model gpt-4o-mini` and `config set-execution disabled` so later features start from defaults.
 
 ## Gotchas

@@ -5,7 +5,7 @@ description: Drive and prove Otter (macOS resource-diagnostic CLI with guarded c
 
 # Verify Otter
 
-Otter is a CLI (`dist/otter`, built from `src/index.ts`). There is no server. Surfaces: a human report on a TTY, JSON when stdout is not a TTY, an interactive `[y/N]` confirmation for `clean`, local trace files, and a settings file. Everything here runs on macOS only (`ps`, `lsof`, `vm_stat`, `launchctl`, `security`).
+Otter is a CLI (`dist/otter`, built from `src/index.ts`). There is no server. Surfaces: a human report on a TTY, JSON when stdout is not a TTY, an interactive typed confirmation for `clean`, local trace files, and a settings file. Everything here runs on macOS only (`ps`, `lsof`, `vm_stat`, `launchctl`, `security`).
 
 All driving goes through one helper. Set `C` once per shell:
 
@@ -50,13 +50,13 @@ Interactive (human report, `clean` confirmation) uses a tmux session on a privat
 
 ```bash
 $C tty start -- clean --window 1                          # real PTY; both stdin and stdout are TTYs
-$C tty wait "Otter local snapshot" 60                     # wait for a literal string
+$C tty wait "OTTER_EXIT=" 60                              # wait for a literal string
 $C tty screen                                             # capture the whole pane
 $C tty drive-clean <feature> <label> <container-name|none>   # answers every prompt, see below
 $C tty stop
 ```
 
-`drive-clean` answers `y` only when a prompt contains `target container <container-name>,` and `n` to every other prompt. Pass `none` to decline everything. Real processes on this machine can be eligible for `clean`; they must never be approved. The helper writes every prompt block and the answer to `<label>.decisions.txt` and the final pane to `<label>.screen.txt`. It waits for the `OTTER_EXIT=<code>` line that the wrapper prints after otter exits.
+`drive-clean` types the container name only for a prompt that contains both `target container <container-name>,` and `Type <container-name> to stop this container:`, and types `n` for every other prompt, which Otter treats as a decline. Pass `none` to decline everything. Real processes and protected executables (Tailscale, Clash on this Mac) can appear in `clean`; they must never be approved. The helper writes every prompt block and the answer to `<label>.decisions.txt` and the final pane to `<label>.screen.txt`. It waits for the `OTTER_EXIT=<code>` line that the wrapper prints after otter exits.
 
 Docker fixture (needed only for `clean` execution):
 
