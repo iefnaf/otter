@@ -38,8 +38,11 @@ export async function requestAnalyzer(
     body: JSON.stringify({
       model: options.model,
       temperature: 0.1,
-      max_tokens: 2000,
+      max_tokens: 4000,
       response_format: { type: "json_object" },
+      ...(options.model === "deepseek-v4-flash"
+        ? { thinking: { type: "disabled" } }
+        : {}),
       messages: [
         { role: "system", content: "Return strict JSON and no markdown." },
         { role: "user", content: prompt },

@@ -19,7 +19,12 @@ describe("analyzer response validation", () => {
         evidenceLevel: "measured",
         title: "Current swap use",
         explanation: "The snapshot reports current swap use.",
-        evidenceRefs: ["memory.swapUsedMb"],
+        evidenceRefs: [
+          "memory.swapUsedMb",
+          "memory.activeMb",
+          "docker.daemonAvailable",
+          "collectorStatus",
+        ],
       }],
       candidateOpinions: [{
         candidateId,
